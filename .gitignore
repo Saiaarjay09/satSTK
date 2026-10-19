@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-stk_output/
+venv/
 .venv/
-stkenv/
+*.csv
+data/de421.bsp

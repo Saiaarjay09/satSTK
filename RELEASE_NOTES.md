@@ -1,17 +1,10 @@
-## satSTK
+## satSTK 0.2.0 - standalone simulator
 
-Python automation for **Ansys STK**: two 600 km Sun-synchronous satellites, Node Alpha's eclipse times, and a 1550 nm laser link
-between the nodes with line-of-sight access, received power, BER and latency.
+satSTK no longer needs Ansys STK, a licence, Windows or COM. It is now a native Python orbital mission and 1550 nm laser-link simulator
+with a mission-control desktop app (3D globe, 2D map, Gantt timeline, telemetry and live plots).
 
-| Download | For |
-|---|---|
-| `satSTK-…-windows.zip` | **Windows with STK installed.** Unzip, double-click `run_windows.bat`. Runs the full STK automation (and the offline preview) |
-| `satSTK-…-macos.zip` | **Mac (or Linux).** STK's desktop app does not run on macOS, so this runs the **offline preview**: an analytic orbit, eclipse and line-of-sight estimate. Unzip, double-click `run_preview_mac.command` |
-
-Both need Python 3.9 to 3.12 installed. The full STK run also needs STK 12 with the Communications capability and its Python API wheel
-(`agi.stk12`, found inside the STK install folder); the launcher asks for it the first time.
-
-### Please note
-- This was written from Ansys' public documentation and has **not been run against a live STK** yet. The orbit maths and the STK plumbing are
-  unit-tested; expect to adjust a name or two on the first real run. The script reports what STK rejected and saves every setting STK exposes.
-- On a Mac, the first time you open the `.command` file macOS may refuse it: right-click it and choose **Open**.
+- Physics: J2 orbit propagation, exact line of sight over the Earth ellipsoid + 100 km atmosphere, conical/cylindrical eclipse,
+  radiator and solar-array model, link budget, BER for BPSK/QPSK/8PSK/16QAM, Doppler and turret slew rates.
+- Runs on macOS and Linux (tested on macOS); no network needed.
+- Download: unzip, then follow the three setup commands in README.md.
+- Not validated against Ansys STK or real hardware. See "Honest limits" in the README.

@@ -1,48 +1,42 @@
-# On a version tag (for example v0.1.0): run the tests, then publish a GitHub Release with one download for Windows and one for macOS.
-# The script is pure Python, so each download is a zip of the script, its tests, the README and the launcher for that system.
+# On a version tag (for example v0.2.0): run the tests, then publish a GitHub Release with one source zip.
+# satSTK is pure Python, so the download is the source, tests, README and launcher; the README explains the three setup commands.
 name: Release
-
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install -r requirements.txt
+      - run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libglib2.0-0
+      - run: python -m pip install -r requirements-dev.txt
       - run: python -m pytest -q
-      - run: python satstk.py --offline-preview
-
   package:
     needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build the two downloads
+      - name: Build the zip
         run: |
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.0-dev"; fi
-          common="satstk.py requirements.txt README.md tests"
-          mkdir -p dist
-          rm -rf stage && mkdir -p "stage/satSTK-$V-windows" && cp -r $common run_windows.bat "stage/satSTK-$V-windows/"
-          rm -rf stage2 && mkdir -p "stage2/satSTK-$V-macos" && cp -r $common run_preview_mac.command "stage2/satSTK-$V-macos/"
-          (cd stage && zip -qr "../dist/satSTK-$V-windows.zip" "satSTK-$V-windows")
-          (cd stage2 && zip -qr "../dist/satSTK-$V-macos.zip" "satSTK-$V-macos")
-          unzip -l "dist/satSTK-$V-macos.zip"
+          mkdir -p dist "stage/satSTK-$V"
+          cp -r *.py ui data tests docs requirements.txt requirements-dev.txt run.sh README.md RELEASE_NOTES.md "stage/satSTK-$V/"
+          (cd stage && zip -qr "../dist/satSTK-$V.zip" "satSTK-$V")
+          unzip -l "dist/satSTK-$V.zip" | tail -5
       - uses: actions/upload-artifact@v4
         with:
-          name: satstk-downloads
+          name: satstk-download
           path: dist/*.zip
           if-no-files-found: error
-
   release:
     if: github.ref_type == 'tag'
     needs: package
@@ -53,7 +47,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: satstk-downloads
+          name: satstk-download
           path: dist
       - name: Publish the release (replacing any earlier release for this tag)
         env:

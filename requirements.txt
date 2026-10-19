@@ -1,2 +1,6 @@
-numpy
-pytest
+# Runtime dependencies - all cross-platform, all free, nothing proprietary.
+numpy>=1.26
+scipy>=1.11
+skyfield>=1.48
+PySide6>=6.6
+pyqtgraph>=0.13.4
