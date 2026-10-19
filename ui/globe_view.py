@@ -46,9 +46,9 @@ class GlobeView(QWidget):
         self._mask = None
         self._stars = np.random.default_rng(7).random((140, 3))
         self._combo = QComboBox(self)
-        self._combo.addItem("Inertial camera (drag to rotate)")
+        self._combo.addItem("Inertial camera")
         self._combo.currentIndexChanged.connect(self._camera_mode_changed)
-        self._combo.setFixedWidth(250)
+        self._combo.setFixedWidth(200)
 
     # ------------------------------------------------------------------ public API
     def set_result(self, result) -> None:
@@ -56,7 +56,7 @@ class GlobeView(QWidget):
         self.idx = 0
         self._combo.blockSignals(True)
         self._combo.clear()
-        self._combo.addItem("Inertial camera (drag to rotate)")
+        self._combo.addItem("Inertial camera")
         for tr in result.tracks:
             self._combo.addItem(f"Follow {tr.name}")
         self._combo.blockSignals(False)
@@ -236,26 +236,37 @@ class GlobeView(QWidget):
             trail.setAlpha(235)
             self._polyline(p, tr.r_eci[j0:i + 1:max(1, stride // 2)], eye, right, up, sc, QPen(trail, 2.2))
 
-        # laser link line
+        # the beam: from the fixed ground station to the target satellite
         link = res.primary_link
-        a, b = res.primary_pair
-        pa, pb = res.tracks[a].r_eci[i], res.tracks[b].r_eci[i]
-        locked = bool(link.visible[i])
-        (xa, xb), (ya, yb), _ = self._project(np.array([pa, pb]), eye, right, up, sc)
-        if locked:
-            glow_pen = QPen(QColor(46, 204, 113, 70), 7)
+        tgt = res.target
+        state, reason = res.beam_state(i)
+        beam_color = {"locked": QColor(theme.GREEN), "degraded": QColor(theme.AMBER), "blocked": QColor(theme.RED)}[state]
+        gs_p = res.station_eci[i]
+        sat_p = res.tracks[tgt].r_eci[i]
+        (xa, xb), (ya, yb), _ = self._project(np.array([gs_p, sat_p]), eye, right, up, sc)
+        if state == "blocked":
+            p.setPen(QPen(beam_color, 1.6, Qt.PenStyle.DashLine))
+        else:
+            glow_pen = QPen(QColor(beam_color.red(), beam_color.green(), beam_color.blue(), 70), 7)
             glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             p.setPen(glow_pen)
             p.drawLine(QPointF(xa, ya), QPointF(xb, yb))
-            p.setPen(QPen(QColor(theme.GREEN), 2.0))
-        else:
-            pen = QPen(QColor(theme.RED), 1.6, Qt.PenStyle.DashLine)
-            p.setPen(pen)
+            p.setPen(QPen(beam_color, 2.0))
         p.drawLine(QPointF(xa, ya), QPointF(xb, yb))
-        mid = QPointF((xa + xb) / 2, (ya + yb) / 2)
         p.setFont(theme.mono_font(9))
-        p.setPen(QColor(theme.GREEN if locked else theme.RED))
-        p.drawText(mid + QPointF(6, -6), f"{link.range_km[i]:,.0f} km" + ("" if locked else "  (blocked)"))
+        p.setPen(beam_color)
+        elev = link.channel["elevation_deg"][i]
+        p.drawText(QPointF((xa + xb) / 2 + 8, (ya + yb) / 2 - 6), f"{link.range_km[i]:,.0f} km  el {elev:+.0f}°" if elev > -90 else "")
+
+        # ground station marker
+        gx, gy, g_hidden = self._project(gs_p, eye, right, up, sc)
+        gc = QColor(theme.GREEN) if not g_hidden[0] else QColor(46, 204, 113, 90)
+        p.setBrush(gc)
+        p.setPen(QPen(QColor("white"), 1.3) if not g_hidden[0] else Qt.PenStyle.NoPen)
+        p.drawPolygon([QPointF(gx[0], gy[0] - 8), QPointF(gx[0] - 6.5, gy[0] + 4.5), QPointF(gx[0] + 6.5, gy[0] + 4.5)])
+        p.setPen(gc)
+        p.setFont(theme.mono_font(9))
+        p.drawText(QPointF(gx[0] + 9, gy[0] + 14), res.config.ground.name)
 
         # satellites
         label_font = QFont(self.font())
@@ -269,6 +280,10 @@ class GlobeView(QWidget):
             p.setBrush(c)
             p.setPen(QPen(QColor("white"), 1.2) if not hidden[0] else Qt.PenStyle.NoPen)
             p.drawEllipse(QPointF(sx[0], sy[0]), 5.5, 5.5)
+            if k == tgt:
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(beam_color, 1.4))
+                p.drawEllipse(QPointF(sx[0], sy[0]), 10, 10)
             p.setFont(label_font)
             p.setPen(c)
             p.drawText(QPointF(sx[0] + 9, sy[0] - 8), tr.name)
@@ -291,11 +306,11 @@ class GlobeView(QWidget):
         # heads-up text
         p.setFont(theme.mono_font(10))
         p.setPen(QColor(theme.TEXT))
-        p.drawText(QPointF(12, 22), f"{res.utc(res.t_s[i]):%Y-%m-%d %H:%M:%S} UTC")
-        p.setPen(QColor(theme.GREEN))
-        p.drawText(QPointF(12, 42), "━ laser link locked")
-        p.setPen(QColor(theme.RED))
-        p.drawText(QPointF(12, 58), "┅ blocked by Earth")
+        p.drawText(QPointF(12, 22), f"{res.utc(res.t_s[i]):%m-%d %H:%M:%S} UTC")
+        p.setPen(beam_color)
+        p.drawText(QPointF(12, 42), f"beam {state.upper()}: {reason}")
+        p.setPen(QColor(theme.DIM))
+        p.drawText(QPointF(12, 58), "green: data · amber: no usable data · red: blocked")
         p.setPen(QColor(theme.DIM))
         p.setFont(theme.mono_font(8))
         p.drawText(QPointF(12, h - 10), "drag: rotate · wheel: zoom · double-click: reset · inertial view, Earth turns")

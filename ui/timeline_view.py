@@ -5,10 +5,13 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QToolTip, QWidget
 
+import orbital_engine as oe
+from events import CATEGORIES, CATEGORY_COLORS
+
 from . import theme
 
 LABEL_W = 300
-ROW_H = 22
+ROW_H = 20
 AXIS_H = 24
 
 
@@ -28,13 +31,19 @@ class TimelineView(QWidget):
         self.result = result
         self.t = 0.0
         rows = []
-        a, b = result.primary_pair
-        na, nb = result.tracks[a].name, result.tracks[b].name
-        rows.append((f"Access  {na} ↔ {nb}", [(s, e, QColor(theme.GREEN)) for s, e in result.access_windows[(a, b)]], QColor(theme.GREEN)))
+        tgt = result.target
+        link = result.primary_link
+        above = oe.mask_to_intervals(link.visible, result.t_s)
+        rows.append((f"Above {result.config.ground.min_elevation_deg:g}° mask  ({result.config.ground.name})", [(s_, e_, QColor("#1f7a8c")) for s_, e_ in above], QColor("#4cc9f0"), None))
+        rows.append((f"Beam on {result.tracks[tgt].name}", [(s_, e_, QColor(theme.GREEN)) for s_, e_ in result.primary_windows], QColor(theme.GREEN), None))
         for k, tr in enumerate(result.tracks):
             ecl = result.eclipse_windows[k]
-            bars = [(s, e, QColor(theme.AMBER)) for s, e in ecl["penumbra"]] + [(s, e, QColor(theme.UMBRA)) for s, e in ecl["umbra"]]
-            rows.append((f"Eclipse  {tr.name}", bars, theme.sat_color(k)))
+            bars = [(s_, e_, QColor(theme.AMBER)) for s_, e_ in ecl["penumbra"]] + [(s_, e_, QColor(theme.UMBRA)) for s_, e_ in ecl["umbra"]]
+            rows.append((f"Eclipse  {tr.name}", bars, theme.sat_color(k), None))
+        for cat in CATEGORIES:
+            evs = [e for e in result.events if e.category == cat]
+            if evs:
+                rows.append((f"Events: {cat}", [(e.start_s, e.end_s, QColor(CATEGORY_COLORS[cat])) for e in evs], QColor(CATEGORY_COLORS[cat]), evs))
         self._rows = rows
         self.setMinimumHeight(AXIS_H + ROW_H * len(rows) + 8)
         self.update()
@@ -63,7 +72,12 @@ class TimelineView(QWidget):
         if self._drag:
             self.seek_requested.emit(t)
         else:
-            QToolTip.showText(ev.globalPosition().toPoint(), f"{self.result.utc(t):%H:%M:%S} UTC  (T+{t/3600:.2f} h)\nclick or drag to jump", self)
+            text = f"{self.result.utc(t):%H:%M:%S} UTC  (T+{t/3600:.2f} h)\nclick or drag to jump"
+            slack = self.result.t_s[-1] / max(1.0, self._plot_rect().width()) * 3.0          # about 3 pixels either side
+            hits = [e for e in self.result.events if e.start_s - slack <= t <= e.end_s + slack]
+            if hits:
+                text += "\n" + "\n".join(f"* {e.name}: {e.duration_s:.0f} s" + (f", +{e.loss_db:.0f} dB" if e.loss_db else "") + (", beam lost" if e.outage else "") for e in hits[:5])
+            QToolTip.showText(ev.globalPosition().toPoint(), text, self)
 
     def mouseReleaseEvent(self, ev) -> None:
         self._drag = False
@@ -92,7 +106,7 @@ class TimelineView(QWidget):
                 p.drawText(QPointF(x - 14, AXIS_H - 8), f"{self.result.utc(h * 3600.0):%H:%M}")
             h += tick_h
 
-        for n, (label, bars, accent) in enumerate(self._rows):
+        for n, (label, bars, accent, _evs) in enumerate(self._rows):
             y = r.top() + n * ROW_H
             p.fillRect(QRectF(r.left(), y + 1, r.width(), ROW_H - 2), QColor(255, 255, 255, 10 if n % 2 == 0 else 5))
             p.setPen(accent)
@@ -107,7 +121,7 @@ class TimelineView(QWidget):
         # legend
         p.setFont(theme.mono_font(8))
         lx = 8.0
-        for text, col, w in (("access", theme.GREEN, 62), ("penumbra", theme.AMBER, 76), ("umbra", theme.UMBRA, 60)):
+        for text, col, w in (("beam", theme.GREEN, 50), ("penumbra", theme.AMBER, 76), ("umbra", theme.UMBRA, 60)):
             p.fillRect(QRectF(lx, 8, 9, 9), QColor(col))
             p.setPen(QColor(theme.DIM))
             p.drawText(QPointF(lx + 13, 16), text)

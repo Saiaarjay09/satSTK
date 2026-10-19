@@ -91,15 +91,17 @@ def gaussian_capture_fraction(range_m, divergence_rad: float, rx_aperture_m: flo
     return -np.expm1(-2.0 * (a / w) ** 2)
 
 
-def pointing_loss_linear(divergence_rad: float, jitter_rad: float, static_rad: float = 0.0) -> float:
+def pointing_loss_linear(divergence_rad, jitter_rad, static_rad=0.0):
     """
     Mean power fraction kept after pointing error. For a Gaussian beam the on-axis fraction at off-axis angle e is
     exp(-k e^2) with k = 8/theta^2. Averaging over a 2-axis Gaussian jitter of RMS sigma and a fixed offset mu gives
         exp(-k mu^2 / (1+2 k sigma^2)) / (1 + 2 k sigma^2).
+    Accepts numbers or arrays (the beam divergence and the jitter can change from moment to moment).
     """
-    k = 8.0 / divergence_rad ** 2
-    denom = 1.0 + 2.0 * k * jitter_rad ** 2
-    return math.exp(-k * static_rad ** 2 / denom) / denom
+    k = 8.0 / np.asarray(divergence_rad, dtype=float) ** 2
+    denom = 1.0 + 2.0 * k * np.asarray(jitter_rad, dtype=float) ** 2
+    out = np.exp(-k * np.asarray(static_rad, dtype=float) ** 2 / denom) / denom
+    return float(out) if np.ndim(out) == 0 else out
 
 
 def tx_gain_db(divergence_rad: float) -> float:
@@ -209,7 +211,7 @@ def turret_pointing(r_own, v_own, r_other, v_other) -> TurretPointing:
 class LinkResult:
     """Everything the GUI plots. Quantities that need a working beam are NaN while the Earth blocks the line of sight."""
     t_s: np.ndarray
-    visible: np.ndarray                 # True = line of sight clear = "locked"
+    visible: np.ndarray                 # True = geometry clear (line of sight / above the elevation mask)
     clearance_km: np.ndarray            # beam-to-Earth closest approach (negative = blocked)
     range_km: np.ndarray
     range_rate_km_s: np.ndarray
@@ -217,7 +219,7 @@ class LinkResult:
     latency_ms: np.ndarray
     fspl_db: np.ndarray
     divergence_loss_db: np.ndarray      # Gaussian beam spreading loss (-10 log10 of the capture fraction)
-    pointing_loss_db: float
+    pointing_loss_db: np.ndarray        # per time step (it changes when an earthquake shakes the telescope)
     rx_power_dbm: np.ndarray
     snr_db: np.ndarray                  # Es/N0 at the symbol rate (the same for every modulation)
     eb_n0_db: dict                      # per modulation
@@ -229,22 +231,31 @@ class LinkResult:
     pointing_b: TurretPointing
     budget_constants: dict = field(default_factory=dict)
     config: LaserLinkConfig | None = None
+    locked: np.ndarray | None = None            # geometry clear AND no outage: the beam is actually on the satellite
+    outage_fraction: np.ndarray | None = None   # share of each step lost to events (birds, aircraft ...)
+    channel: dict | None = None                 # ground links: elevation, azimuth, atmosphere/weather/turbulence/event losses per step
 
 
-def link_budget(range_km, cfg: LaserLinkConfig) -> dict:
-    """Pure link-budget maths for given ranges (no geometry): returns arrays/scalars keyed by name."""
+def link_budget(range_km, cfg: LaserLinkConfig, divergence_urad=None, jitter_urad=None, extra_loss_db=0.0) -> dict:
+    """
+    Pure link-budget maths for given ranges (no geometry): returns arrays/scalars keyed by name.
+    `divergence_urad`, `jitter_urad` and `extra_loss_db` may be arrays: ground links use them for turbulence beam spreading, event-driven
+    jitter and the atmosphere / weather / event losses.
+    """
     lam = cfg.wavelength_nm * 1e-9
     rng_m = np.asarray(range_km, dtype=float) * 1000.0
-    div = cfg.divergence_urad * 1e-6
+    div = (cfg.divergence_urad if divergence_urad is None else np.asarray(divergence_urad, dtype=float)) * 1e-6
+    jit = (cfg.pointing_jitter_urad if jitter_urad is None else np.asarray(jitter_urad, dtype=float)) * 1e-6
     capture = gaussian_capture_fraction(rng_m, div, cfg.rx_aperture_m)
-    point = pointing_loss_linear(div, cfg.pointing_jitter_urad * 1e-6, cfg.static_pointing_error_urad * 1e-6)
-    p_rx = cfg.tx_power_w * cfg.tx_optics_efficiency * cfg.rx_optics_efficiency * capture * point
+    point = pointing_loss_linear(div, jit, cfg.static_pointing_error_urad * 1e-6)
+    extra = 10.0 ** (-np.asarray(extra_loss_db, dtype=float) / 10.0)
+    p_rx = cfg.tx_power_w * cfg.tx_optics_efficiency * cfg.rx_optics_efficiency * capture * point * extra
     penalty = 10.0 ** (cfg.implementation_penalty_db / 10.0)
     es_n0 = cfg.detector_efficiency * p_rx / (cfg.symbol_rate_gbaud * 1e9) / (0.5 * cfg.photon_energy_j) / penalty
     out = {"fspl_db": fspl_db(rng_m, lam), "divergence_loss_db": -10.0 * np.log10(np.maximum(capture, 1e-300)),
-           "pointing_loss_db": -10.0 * math.log10(point), "rx_power_w": p_rx, "rx_power_dbm": watts_to_dbm(p_rx),
-           "es_n0": es_n0, "snr_db": 10.0 * np.log10(np.maximum(es_n0, 1e-300)), "latency_ms": rng_m / C_M_S * 1e3 + cfg.processing_latency_ms,
-           "eb_n0": {}, "ber": {}, "throughput_gbps": {}}
+           "pointing_loss_db": -10.0 * np.log10(np.maximum(point, 1e-300)) * np.ones_like(rng_m), "rx_power_w": p_rx,
+           "rx_power_dbm": watts_to_dbm(p_rx), "es_n0": es_n0, "snr_db": 10.0 * np.log10(np.maximum(es_n0, 1e-300)),
+           "latency_ms": rng_m / C_M_S * 1e3 + cfg.processing_latency_ms, "eb_n0": {}, "ber": {}, "throughput_gbps": {}}
     for name, k in MODULATIONS.items():
         eb = es_n0 / k
         ber = np.maximum(ber_from_eb_n0(name, eb), cfg.ber_floor)
@@ -271,7 +282,7 @@ def compute_link(t_s, track_a, track_b, cfg: LaserLinkConfig, visible, clearance
     best_idx = np.where(best > 0, stack.argmax(axis=0), -1)
     lam = cfg.wavelength_nm * 1e-9
     consts = {"tx_power_dbm": float(watts_to_dbm(cfg.tx_power_w)), "tx_gain_db": tx_gain_db(cfg.divergence_urad * 1e-6),
-              "rx_gain_db": rx_gain_db(cfg.rx_aperture_m, lam), "pointing_loss_db": b["pointing_loss_db"],
+              "rx_gain_db": rx_gain_db(cfg.rx_aperture_m, lam), "pointing_loss_db": float(b["pointing_loss_db"][0]),
               "optics_loss_db": -10.0 * math.log10(cfg.tx_optics_efficiency * cfg.rx_optics_efficiency),
               "carrier_frequency_thz": cfg.frequency_hz / 1e12}
     return LinkResult(
@@ -282,4 +293,52 @@ def compute_link(t_s, track_a, track_b, cfg: LaserLinkConfig, visible, clearance
         adaptive_throughput_gbps=best, adaptive_modulation=best_idx,
         pointing_a=turret_pointing(track_a.r_eci, track_a.v_eci, track_b.r_eci, track_b.v_eci),
         pointing_b=turret_pointing(track_b.r_eci, track_b.v_eci, track_a.r_eci, track_a.v_eci),
-        budget_constants=consts, config=cfg)
+        budget_constants=consts, config=cfg, locked=np.asarray(visible).copy(), outage_fraction=np.zeros(len(rng)))
+
+
+def compute_ground_link(t_s, station, r_station_eci, v_station_eci, track, topo, cfg: LaserLinkConfig, atmosphere_cfg, effects=None) -> LinkResult:
+    """
+    Laser link from a fixed ground station (the beam origin) up to one satellite.
+
+    `topo` is the satellite as seen from the station (orbital_engine.topocentric_state); `effects` are the random events
+    (events.apply_events) or None. The beam is usable only while the satellite is above the station's minimum elevation.
+    Losses added on top of the space-link budget: clear-air/haze, cloud/fog/rain, the turbulence fade margin (99.9 %) and events. Turbulence
+    also spreads the beam slightly (added in quadrature to the 100 microradian divergence) and events can multiply the pointing jitter.
+    """
+    import atmosphere as atm
+    from events import EventEffects
+    n = len(t_s)
+    eff = effects if effects is not None else EventEffects(np.zeros(n), np.zeros(n), np.ones(n))
+    el = topo.elevation_deg
+    visible = el >= station.min_elevation_deg
+    locked = visible & (eff.outage_fraction < 0.5)
+    rng, rate = relative_kinematics(r_station_eci, v_station_eci, track.r_eci, track.v_eci)
+    ch = atm.channel(el, station.alt_m, atmosphere_cfg, cfg.wavelength_nm)
+    atmosphere_loss = ch["clear_air_loss_db"] + ch["weather_loss_db"] + ch["scintillation_fade_db"]
+    div_eff = np.sqrt(cfg.divergence_urad ** 2 + ch["beam_spread_urad"] ** 2)
+    b = link_budget(topo.range_km, cfg, divergence_urad=div_eff, jitter_urad=cfg.pointing_jitter_urad * eff.jitter_factor,
+                    extra_loss_db=atmosphere_loss + eff.loss_db)
+    nan = np.where(locked, 1.0, np.nan)
+    thr_scale = np.where(visible, 1.0 - eff.outage_fraction, 0.0)
+    ber = {m: v * nan for m, v in b["ber"].items()}
+    ebn0 = {m: 10.0 * np.log10(np.maximum(v, 1e-300)) * nan for m, v in b["eb_n0"].items()}
+    thr = {m: v * thr_scale for m, v in b["throughput_gbps"].items()}
+    names = list(MODULATIONS)
+    stack = np.stack([thr[m] for m in names])
+    best = stack.max(axis=0)
+    best_idx = np.where(best > 0, stack.argmax(axis=0), -1)
+    lam = cfg.wavelength_nm * 1e-9
+    consts = {"tx_power_dbm": float(watts_to_dbm(cfg.tx_power_w)), "tx_gain_db": tx_gain_db(cfg.divergence_urad * 1e-6),
+              "rx_gain_db": rx_gain_db(cfg.rx_aperture_m, lam), "pointing_loss_db": float(b["pointing_loss_db"][0]),
+              "optics_loss_db": -10.0 * math.log10(cfg.tx_optics_efficiency * cfg.rx_optics_efficiency),
+              "carrier_frequency_thz": cfg.frequency_hz / 1e12}
+    channel = dict(ch, elevation_deg=el, azimuth_deg=topo.azimuth_deg, event_loss_db=eff.loss_db, atmosphere_loss_db=atmosphere_loss,
+                   total_extra_loss_db=atmosphere_loss + eff.loss_db, divergence_effective_urad=div_eff, jitter_factor=eff.jitter_factor)
+    station_pointing = TurretPointing(topo.azimuth_deg, el, topo.azimuth_rate_deg_s, topo.elevation_rate_deg_s, topo.slew_rate_deg_s)
+    return LinkResult(
+        t_s=np.asarray(t_s), visible=visible, clearance_km=el - station.min_elevation_deg, range_km=rng, range_rate_km_s=rate,
+        doppler_ghz=doppler_shift_hz(rate, cfg.frequency_hz) / 1e9, latency_ms=b["latency_ms"], fspl_db=b["fspl_db"],
+        divergence_loss_db=b["divergence_loss_db"], pointing_loss_db=b["pointing_loss_db"], rx_power_dbm=b["rx_power_dbm"] * nan,
+        snr_db=b["snr_db"] * nan, eb_n0_db=ebn0, ber=ber, throughput_gbps=thr, adaptive_throughput_gbps=best, adaptive_modulation=best_idx,
+        pointing_a=station_pointing, pointing_b=turret_pointing(track.r_eci, track.v_eci, r_station_eci, v_station_eci),
+        budget_constants=consts, config=cfg, locked=locked, outage_fraction=eff.outage_fraction, channel=channel)

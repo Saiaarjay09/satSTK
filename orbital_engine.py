@@ -329,6 +329,94 @@ def line_of_sight(r1: np.ndarray, r2: np.ndarray, buffer_km: float = ATMOSPHERE_
 
 
 # ----------------------------------------------------------------------------------------------------------------------
+# 5b. Ground station (the fixed origin of the laser beam)
+# ----------------------------------------------------------------------------------------------------------------------
+@dataclass
+class GroundStation:
+    """
+    A laser ground station at a fixed place on the Earth. The beam starts here and is pointed at the satellite.
+    `min_elevation_deg` is the lowest angle above the horizon at which the beam may be used (optical stations normally need 15-30
+    degrees: below that the beam crosses too much air and, in practice, trees, buildings and hills).
+    """
+    name: str = "Teide OGS"
+    lat_deg: float = 28.30            # default: the Teide Observatory optical ground station, Tenerife
+    lon_deg: float = -16.51
+    alt_m: float = 2390.0
+    min_elevation_deg: float = 20.0
+
+    def ecef(self) -> np.ndarray:
+        return geodetic_to_ecef(self.lat_deg, self.lon_deg, self.alt_m / 1000.0)
+
+    def enu_matrix(self) -> np.ndarray:
+        """Rows are the East, North and Up unit vectors (in ECEF) at the station."""
+        lat, lon = math.radians(self.lat_deg), math.radians(self.lon_deg)
+        return np.array([[-math.sin(lon), math.cos(lon), 0.0],
+                         [-math.sin(lat) * math.cos(lon), -math.sin(lat) * math.sin(lon), math.cos(lat)],
+                         [math.cos(lat) * math.cos(lon), math.cos(lat) * math.sin(lon), math.sin(lat)]])
+
+
+def ecef_to_eci(r_ecef: np.ndarray, gmst: np.ndarray) -> np.ndarray:
+    """Inverse of `eci_to_ecef`."""
+    c, s = np.cos(gmst), np.sin(gmst)
+    out = np.empty_like(r_ecef, dtype=float)
+    out[..., 0] = c * r_ecef[..., 0] - s * r_ecef[..., 1]
+    out[..., 1] = s * r_ecef[..., 0] + c * r_ecef[..., 1]
+    out[..., 2] = r_ecef[..., 2]
+    return out
+
+
+def station_state_eci(gs: GroundStation, gmst: np.ndarray):
+    """Station position (n,3) km and velocity (n,3) km/s in the inertial frame (the Earth carries it round at 0.46 km/s)."""
+    r = ecef_to_eci(np.repeat(gs.ecef()[None, :], len(gmst), axis=0), gmst)
+    v = np.stack([-OMEGA_EARTH * r[:, 1], OMEGA_EARTH * r[:, 0], np.zeros(len(gmst))], axis=1)
+    return r, v
+
+
+@dataclass
+class Topocentric:
+    """Where the satellite is as seen from the station: the pointing angles the ground telescope needs and how fast they change."""
+    elevation_deg: np.ndarray
+    azimuth_deg: np.ndarray             # clockwise from true north
+    range_km: np.ndarray
+    elevation_rate_deg_s: np.ndarray
+    azimuth_rate_deg_s: np.ndarray
+    slew_rate_deg_s: np.ndarray
+
+
+def topocentric_state(gs: GroundStation, r_ecef: np.ndarray, v_ecef: np.ndarray) -> Topocentric:
+    """
+    Elevation, azimuth, range and (analytic) angular rates of a satellite seen from the station.
+    `v_ecef` is the satellite velocity measured in the rotating Earth frame (v_inertial rotated, minus omega x r).
+    """
+    enu = gs.enu_matrix()
+    d = (np.atleast_2d(r_ecef) - gs.ecef()) @ enu.T
+    v = np.atleast_2d(v_ecef) @ enu.T
+    rng = np.maximum(np.linalg.norm(d, axis=1), 1e-12)
+    u = d / rng[:, None]
+    u_dot = (v - np.einsum("ij,ij->i", v, u)[:, None] * u) / rng[:, None]
+    e, n, up = u[:, 0], u[:, 1], u[:, 2]
+    horiz2 = np.maximum(e * e + n * n, 1e-18)
+    az = np.degrees(np.arctan2(e, n)) % 360.0
+    el = np.degrees(np.arcsin(np.clip(up, -1, 1)))
+    az_rate = np.degrees((n * u_dot[:, 0] - e * u_dot[:, 1]) / horiz2)
+    el_rate = np.degrees(u_dot[:, 2] / np.sqrt(np.maximum(1 - up * up, 1e-18)))
+    return Topocentric(el, az, rng, el_rate, az_rate, np.degrees(np.linalg.norm(u_dot, axis=1)))
+
+
+def sun_elevation_deg(gs: GroundStation, sun_eci: np.ndarray, gmst: np.ndarray) -> np.ndarray:
+    """Elevation of the Sun above the station's horizon (negative = night); tells you whether the sky is dark."""
+    s_ecef = eci_to_ecef(sun_eci / np.linalg.norm(sun_eci, axis=1)[:, None], gmst)
+    return np.degrees(np.arcsin(np.clip(s_ecef @ gs.enu_matrix()[2], -1, 1)))
+
+
+def horizon_cap_radius_deg(altitude_km: float, min_elevation_deg: float = 0.0) -> float:
+    """Ground radius (great-circle degrees) within which a satellite at `altitude_km` is above `min_elevation_deg`."""
+    r = R_EARTH + altitude_km
+    el = math.radians(min_elevation_deg)
+    return math.degrees(math.acos(R_EARTH * math.cos(el) / r) - el)
+
+
+# ----------------------------------------------------------------------------------------------------------------------
 # 6. Eclipse (Earth shadow)
 # ----------------------------------------------------------------------------------------------------------------------
 def sun_visibility(r_sat: np.ndarray, r_sun: np.ndarray, model: str = "conical") -> np.ndarray:

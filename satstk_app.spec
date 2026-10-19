@@ -9,8 +9,8 @@ for pkg in ("skyfield", "pyqtgraph", "scipy"):       # skyfield ships its leap-s
     datas += d
     binaries += b
     hiddenimports += h
-hiddenimports += ["orbital_engine", "laser_link_engine", "simulation", "ui.clock", "ui.geo", "ui.globe_view", "ui.map_view",
-                  "ui.scenario_dialog", "ui.telemetry_panel", "ui.theme", "ui.timeline_view"]
+hiddenimports += ["orbital_engine", "laser_link_engine", "atmosphere", "events", "simulation", "ui.clock", "ui.conditions_panel", "ui.events_dialog",
+                  "ui.geo", "ui.globe_view", "ui.map_view", "ui.placement_dialog", "ui.telemetry_panel", "ui.theme", "ui.timeline_view"]
 
 QT_UNUSED = ["PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineQuick", "PySide6.QtQuick", "PySide6.QtQml",
              "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.QtMultimedia", "PySide6.QtCharts", "PySide6.QtDataVisualization",
@@ -22,4 +22,4 @@ exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="satSTK", console=Fals
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="satSTK")
 if sys.platform == "darwin":
     app = BUNDLE(coll, name="satSTK.app", bundle_identifier="org.satstk.app",
-                 info_plist={"CFBundleShortVersionString": "0.2.0", "NSHighResolutionCapable": True})
+                 info_plist={"CFBundleShortVersionString": "0.3.0", "NSHighResolutionCapable": True})

@@ -8,6 +8,7 @@ import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QComboBox, QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
+import events as ev_mod
 import orbital_engine as oe
 from laser_link_engine import MODULATIONS
 
@@ -52,14 +53,15 @@ class TelemetryPanel(QWidget):
         root.addLayout(top)
 
         self._link_labels = {}
-        root.addWidget(self._section("LASER LINK  (1550 nm OISL)"))
+        root.addWidget(self._section("LASER BEAM  (ground station → satellite, 1550 nm)"))
         grid = QGridLayout()
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(1)
-        fields = [("status", "Status"), ("range", "Range"), ("rate", "Range rate"), ("latency", "Latency"), ("doppler", "Doppler"),
-                  ("rx", "Received power"), ("snr", "SNR (Es/N0)"), ("ebn0", "Eb/N0"), ("ber", "BER"), ("thr", "Throughput"),
-                  ("adaptive", "Best modulation"), ("fspl", "Path loss (FSPL)"), ("div", "Divergence loss"), ("point", "Pointing loss"),
-                  ("clear", "Grazing clearance")]
+        fields = [("status", "Beam"), ("elev", "Elevation"), ("range", "Slant range"), ("rate", "Range rate"), ("latency", "Latency"),
+                  ("doppler", "Doppler"), ("rx", "Received power"), ("snr", "SNR (Es/N0)"), ("ebn0", "Eb/N0"), ("ber", "BER"),
+                  ("thr", "Throughput"), ("adaptive", "Best modulation"), ("fspl", "Path loss (FSPL)"), ("div", "Divergence loss"),
+                  ("point", "Pointing loss"), ("air", "Clear-air / haze"), ("weather", "Cloud/fog/rain"), ("turb", "Turbulence fade"),
+                  ("evloss", "Event loss"), ("r0", "Fried r0"), ("sky", "Station sky")]
         for n, (key, label) in enumerate(fields):
             r, c = divmod(n, 2)
             grid.addWidget(self._dim(label), r, c * 2)
@@ -67,6 +69,21 @@ class TelemetryPanel(QWidget):
             grid.addWidget(lab, r, c * 2 + 1)
             self._link_labels[key] = lab
         root.addLayout(grid)
+        self._events_label = QLabel("Events now: none")
+        self._events_label.setWordWrap(True)
+        root.addWidget(self._events_label)
+
+        root.addWidget(self._section("TELESCOPES  (pointing and slew rates)"))
+        tgrid = QGridLayout()
+        tgrid.setHorizontalSpacing(10)
+        tgrid.setVerticalSpacing(1)
+        self._tele = {}
+        for r, (key, label) in enumerate([("gaz", "Ground: azimuth"), ("gel", "Ground: elevation"), ("grate", "Ground: az / el rate"), ("gslew", "Ground: slew rate"),
+                                          ("saz", "Satellite: azimuth"), ("sel", "Satellite: elevation"), ("sslew", "Satellite: slew rate")]):
+            tgrid.addWidget(self._dim(label), r, 0)
+            self._tele[key] = self._value()
+            tgrid.addWidget(self._tele[key], r, 1)
+        root.addLayout(tgrid)
 
         self._sat_labels = []
         self._sat_grid = QGridLayout()
@@ -111,8 +128,7 @@ class TelemetryPanel(QWidget):
                 w.deleteLater()
         self._sat_labels = []
         rows = [("lat", "Latitude"), ("lon", "Longitude"), ("alt", "Altitude"), ("speed", "Speed"), ("ecl", "Sun / eclipse"),
-                ("beta", "Beta angle"), ("temp", "Radiator temp"), ("pwr", "Solar array"), ("az", "Turret azimuth"),
-                ("el", "Turret elevation"), ("slew", "Turret slew rate"), ("azr", "Az / El rate")]
+                ("beta", "Beta angle"), ("temp", "Radiator temp"), ("pwr", "Solar array")]
         for k, tr in enumerate(result.tracks):
             head = QLabel(tr.name)
             head.setStyleSheet(f"color: {theme.sat_color(k).name()}; font-weight: bold;")
@@ -164,10 +180,15 @@ class TelemetryPanel(QWidget):
             pen = pg.mkPen(color, width=width, style=style or Qt.PenStyle.SolidLine)
             return pw.plot(x, np.asarray(y)[::stride], pen=pen, connect="finite", name=name)
 
-        pw = new_plot("range", "Range (km)", "km")
+        pw = new_plot("range", "Slant range (km)", "km")
         curve(pw, link.range_km, theme.ACCENT)
+        pw = new_plot("elev", "Elevation of the satellite above the station's horizon (°)  - dashed: minimum", "deg")
+        curve(pw, link.channel["elevation_deg"], "#4cc9f0")
+        pw.addItem(pg.InfiniteLine(pos=res.config.ground.min_elevation_deg, angle=0, pen=pg.mkPen(theme.DIM, style=Qt.PenStyle.DashLine)))
         pw = new_plot("rx", "Received optical power (dBm)", "dBm")
         curve(pw, link.rx_power_dbm, theme.GREEN)
+        pw = new_plot("loss", "Channel loss: atmosphere + weather + turbulence + events (dB)", "dB")
+        curve(pw, np.where(link.visible, link.channel["total_extra_loss_db"], np.nan), "#ff7a45")
         self._ber_plot = new_plot("ber", "Bit error rate (selected modulation, log scale)", "BER")
         self._ber_plot.setLogMode(False, True)
         self._ber_curve = curve(self._ber_plot, link.ber[self.modulation], "#ff7ab6")
@@ -203,10 +224,15 @@ class TelemetryPanel(QWidget):
         for line in self._lines:
             line.setValue(t_h)
         link, m = res.primary_link, self.modulation
+        ch = link.channel
         L = self._link_labels
-        locked = bool(link.visible[i])
-        L["status"].setText("LOCKED" if locked else "OCCLUDED")
-        L["status"].setStyleSheet(f"color: {theme.GREEN if locked else theme.RED}; font-weight: bold;")
+        state, reason = res.beam_state(i)
+        color = {"locked": theme.GREEN, "degraded": theme.AMBER, "blocked": theme.RED}[state]
+        L["status"].setText(state.upper())
+        L["status"].setToolTip(reason)
+        L["status"].setStyleSheet(f"color: {color}; font-weight: bold;")
+        el = float(ch["elevation_deg"][i])
+        L["elev"].setText(_fmt(el, "+.2f", "°"))
         L["range"].setText(_fmt(float(link.range_km[i]), ",.1f", "km"))
         L["rate"].setText(_fmt(float(link.range_rate_km_s[i]), "+.3f", "km/s"))
         L["latency"].setText(_fmt(float(link.latency_ms[i]), ".3f", "ms"))
@@ -215,34 +241,47 @@ class TelemetryPanel(QWidget):
         L["snr"].setText(_fmt(float(link.snr_db[i]), ".2f", "dB"))
         L["ebn0"].setText(_fmt(float(link.eb_n0_db[m][i]), ".2f", "dB"))
         L["ber"].setText(_fmt_ber(float(link.ber[m][i])))
-        L["thr"].setText(_fmt(float(link.throughput_gbps[m][i]), ".1f", "Gbps") if locked else "—")
+        L["thr"].setText(_fmt(float(link.throughput_gbps[m][i]), ".1f", "Gbps") if link.visible[i] else "—")
         best = int(link.adaptive_modulation[i])
         names = list(MODULATIONS)
         L["adaptive"].setText(f"{names[best]} @ {link.adaptive_throughput_gbps[i]:.0f} Gbps" if best >= 0 else "—")
         L["fspl"].setText(_fmt(float(link.fspl_db[i]), ".2f", "dB"))
         L["div"].setText(_fmt(float(link.divergence_loss_db[i]), ".2f", "dB"))
-        L["point"].setText(_fmt(link.pointing_loss_db, ".2f", "dB"))
-        L["clear"].setText(_fmt(float(link.clearance_km[i]), "+,.0f", "km"))
-        a, b = res.primary_pair
-        turrets = {a: link.pointing_a, b: link.pointing_b}
+        L["point"].setText(_fmt(float(link.pointing_loss_db[i]), ".2f", "dB"))
+        L["air"].setText(_fmt(float(ch["clear_air_loss_db"][i]), ".2f", "dB") if link.visible[i] else "—")
+        L["weather"].setText(_fmt(float(ch["weather_loss_db"][i]), ".2f", "dB") if link.visible[i] else "—")
+        L["turb"].setText(_fmt(float(ch["scintillation_fade_db"][i]), ".2f", "dB") if link.visible[i] else "—")
+        L["evloss"].setText(_fmt(float(ch["event_loss_db"][i]), ".2f", "dB") + (f" (lost {100 * link.outage_fraction[i]:.0f}%)" if link.outage_fraction[i] > 0 else ""))
+        L["r0"].setText(_fmt(float(ch["fried_r0_m"][i]) * 100, ".1f", "cm"))
+        sun_el = float(res.station_sun_elevation_deg[i])
+        L["sky"].setText(f"{'night' if sun_el < -12 else 'twilight' if sun_el < 0 else 'day'} (Sun {sun_el:+.0f}°)")
+
+        active = ev_mod.active_events(res.events, float(res.t_s[i]), res.config.step_s)
+        if active:
+            self._events_label.setText("⚠ Events now: " + "; ".join(f"{e.name}" + (f" (+{e.loss_db:.0f} dB)" if e.loss_db else "") + (" - beam lost" if e.outage else "") for e in active))
+            self._events_label.setStyleSheet(f"color: {theme.AMBER}; font-weight: bold;")
+        else:
+            self._events_label.setText("Events now: none" + ("" if res.events else "  (random events are off, or none happened in this run)"))
+            self._events_label.setStyleSheet(f"color: {theme.DIM};")
+
+        gp, sp_ = link.pointing_a, link.pointing_b
+        T = self._tele
+        T["gaz"].setText(f"{gp.azimuth_deg[i]:.2f}°")
+        T["gel"].setText(f"{gp.elevation_deg[i]:+.2f}°")
+        T["grate"].setText(f"{gp.azimuth_rate_deg_s[i]:+.3f} / {gp.elevation_rate_deg_s[i]:+.3f} °/s")
+        T["gslew"].setText(f"{gp.slew_rate_deg_s[i]:.3f} °/s")
+        T["saz"].setText(f"{sp_.azimuth_deg[i]:.2f}°")
+        T["sel"].setText(f"{sp_.elevation_deg[i]:+.2f}°")
+        T["sslew"].setText(f"{sp_.slew_rate_deg_s[i]:.4f} °/s")
         for k, tr in enumerate(res.tracks):
             d = self._sat_labels[k]
             d["lat"].setText(f"{tr.lat_deg[i]:+.3f}°")
             d["lon"].setText(f"{tr.lon_deg[i]:+.3f}°")
             d["alt"].setText(f"{tr.alt_km[i]:.1f} km")
             d["speed"].setText(f"{np.linalg.norm(tr.v_eci[i]):.3f} km/s")
-            state = int(tr.eclipse[i])
-            d["ecl"].setText(f"{oe.ECLIPSE_NAMES[state]} {100 * tr.sun_visibility[i]:.0f}%")
-            d["ecl"].setStyleSheet(f"color: {ECLIPSE_COLORS[state]};")
+            state_e = int(tr.eclipse[i])
+            d["ecl"].setText(f"{oe.ECLIPSE_NAMES[state_e]} {100 * tr.sun_visibility[i]:.0f}%")
+            d["ecl"].setStyleSheet(f"color: {ECLIPSE_COLORS[state_e]};")
             d["beta"].setText(f"{tr.beta_deg[i]:+.1f}°")
             d["temp"].setText(f"{tr.radiator_temp_c[i]:.1f} °C")
             d["pwr"].setText(f"{tr.solar_power_w[i] / 1000:.1f} kW")
-            tp = turrets.get(k)
-            if tp is not None:
-                d["az"].setText(f"{tp.azimuth_deg[i]:.2f}°")
-                d["el"].setText(f"{tp.elevation_deg[i]:+.2f}°")
-                d["slew"].setText(f"{tp.slew_rate_deg_s[i]:.4f} °/s")
-                d["azr"].setText(f"{tp.azimuth_rate_deg_s[i]:+.4f} / {tp.elevation_rate_deg_s[i]:+.4f}")
-            else:
-                for key in ("az", "el", "slew", "azr"):
-                    d[key].setText("n/a")

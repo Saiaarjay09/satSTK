@@ -2,9 +2,10 @@
 """
 satSTK - Orbital Mission & Laser Link Simulator.  Launch with:
 
-    python main_app.py                          the desktop app (3D globe, 2D map, timeline, telemetry)
+    python main_app.py                          the desktop app: first place the beam origin on the map, then simulate
+    python main_app.py --lat 28.3 --lon -16.5   skip the placement window and start with this ground station
     python main_app.py --headless               no window: run the scenario and print the summary
-    python main_app.py --headless --csv out.csv also write the link time series (only when you ask)
+    python main_app.py --headless --csv out.csv also write the beam's time series (only when you ask)
     python main_app.py --screenshot shot.png    draw the window once and save a picture (used for the README and CI)
 
 Everything runs locally with NumPy/SciPy/Skyfield and Qt. No Ansys STK, no Windows COM, no network, no account.
@@ -15,30 +16,59 @@ import argparse
 import sys
 from datetime import datetime, timezone
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 def parse_args(argv=None) -> argparse.Namespace:
-    ap = argparse.ArgumentParser(description="satSTK: native orbital mission and 1550 nm laser-link simulator")
+    ap = argparse.ArgumentParser(description="satSTK: native orbital mission and 1550 nm laser-link simulator (ground station to satellite)")
     ap.add_argument("--headless", action="store_true", help="run the scenario without a window and print a summary")
-    ap.add_argument("--csv", metavar="FILE", help="with --headless: also write the primary link's time series to this CSV")
+    ap.add_argument("--csv", metavar="FILE", help="with --headless: also write the beam's time series to this CSV")
     ap.add_argument("--screenshot", metavar="PNG", help="open the window, draw it once, save a picture and exit")
-    ap.add_argument("--at-hours", type=float, default=2.0, help="with --screenshot: simulation time to show (default 2.0 h)")
-    ap.add_argument("--size", default="1600x960", help="with --screenshot: window size, e.g. 1600x960")
-    ap.add_argument("--hours", type=float, default=24.0, help="scenario length in hours (default 24)")
-    ap.add_argument("--step", type=float, default=10.0, help="time step in seconds: 1 or 10 (default 10)")
-    ap.add_argument("--start", default="2026-12-21T00:00:00", help="scenario start, UTC, ISO format (default 2026-12-21T00:00:00)")
+    ap.add_argument("--at-hours", type=float, default=None, help="with --screenshot: simulation time to show (default: the middle of the first pass)")
+    ap.add_argument("--size", default="1700x960", help="with --screenshot: window size, e.g. 1700x960")
     ap.add_argument("--selftest", action="store_true", help="build the window offscreen, render every pane, print SELFTEST OK (used to test the packaged app)")
     ap.add_argument("--selftest-file", metavar="FILE", help="with --selftest: also write the result to this file")
+    g = ap.add_argument_group("scenario")
+    g.add_argument("--lat", type=float, help="ground station latitude, degrees north (skips the placement window)")
+    g.add_argument("--lon", type=float, help="ground station longitude, degrees east")
+    g.add_argument("--alt-m", type=float, default=None, help="ground station altitude in metres")
+    g.add_argument("--min-elevation", type=float, default=None, help="lowest usable elevation angle in degrees (default 20)")
+    g.add_argument("--weather", default=None, help="weather preset: Clear, Hazy, 'Thin cirrus', 'Light fog', 'Dense fog', Overcast, Rain, Thunderstorm, 'Hot afternoon'")
+    g.add_argument("--events", action="store_true", help="switch random events on")
+    g.add_argument("--event-seed", type=int, default=1, help="random seed for events (same seed = same events)")
+    g.add_argument("--event-rate", type=float, default=1.0, help="event frequency multiplier (1 = typical, 100 = everything goes wrong)")
+    g.add_argument("--two-satellites", action="store_true", help="add the second satellite, Orbital-Node-Beta")
+    g.add_argument("--hours", type=float, default=24.0, help="scenario length in hours (default 24)")
+    g.add_argument("--step", type=float, default=10.0, help="time step in seconds: 1 or 10 (default 10)")
+    g.add_argument("--start", default="2026-12-21T00:00:00", help="scenario start, UTC, ISO format (default 2026-12-21T00:00:00)")
     ap.add_argument("--version", action="version", version=f"satSTK {__version__}")
     return ap.parse_args(argv)
 
 
 def config_from_args(args):
-    from simulation import SimulationConfig
+    import orbital_engine as oe
+    from atmosphere import WEATHER_PRESETS
+    from events import EventsConfig
+    from simulation import SimulationConfig, two_satellites, default_satellites
     start = datetime.fromisoformat(args.start)
     start = start.replace(tzinfo=timezone.utc) if start.tzinfo is None else start.astimezone(timezone.utc)
-    return SimulationConfig(start=start, duration_h=args.hours, step_s=args.step)
+    cfg = SimulationConfig(start=start, duration_h=args.hours, step_s=args.step,
+                           satellites=two_satellites() if args.two_satellites else default_satellites(),
+                           events=EventsConfig(enabled=args.events, seed=args.event_seed, rate_scale=args.event_rate))
+    gs = cfg.ground
+    if args.lat is not None or args.lon is not None:
+        gs = oe.GroundStation("Ground station", args.lat if args.lat is not None else gs.lat_deg, args.lon if args.lon is not None else gs.lon_deg, gs.alt_m, gs.min_elevation_deg)
+    if args.alt_m is not None:
+        gs.alt_m = args.alt_m
+    if args.min_elevation is not None:
+        gs.min_elevation_deg = args.min_elevation
+    cfg.ground = gs
+    if args.weather:
+        match = {k.lower(): v for k, v in WEATHER_PRESETS.items()}.get(args.weather.lower())
+        if match is None:
+            raise SystemExit(f"unknown weather preset {args.weather!r}; choose from {list(WEATHER_PRESETS)}")
+        cfg.atmosphere = match
+    return cfg
 
 
 def run_headless(args) -> int:
@@ -53,17 +83,20 @@ def run_headless(args) -> int:
 
 def build_window_classes():
     """Qt classes are created lazily so `--headless` and the physics tests never need a display or PySide6."""
-    from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+    from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
     from PySide6.QtGui import QAction, QKeySequence
     from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
                                    QMessageBox, QProgressBar, QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget)
 
+    import orbital_engine as oe
     from simulation import SimulationConfig, run_simulation
     from ui import theme
     from ui.clock import SPEEDS, PlaybackClock
+    from ui.conditions_panel import ConditionsPanel
+    from ui.events_dialog import EventsDialog
     from ui.globe_view import GlobeView
     from ui.map_view import MapView
-    from ui.scenario_dialog import ScenarioDialog
+    from ui.placement_dialog import PlacementDialog
     from ui.telemetry_panel import TelemetryPanel
     from ui.timeline_view import TimelineView
 
@@ -87,19 +120,22 @@ def build_window_classes():
         def __init__(self, cfg: SimulationConfig | None = None):
             super().__init__()
             self.setWindowTitle(f"satSTK {__version__} - Orbital Mission & Laser Link Simulator")
-            self.resize(1600, 960)
+            self.resize(1700, 960)
             self.cfg = cfg or SimulationConfig()
             self.result = None
             self._thread = None
+            self._pending = None
+            self._keep_time = None
             self.clock = PlaybackClock(self)
 
             self.globe, self.map, self.timeline = GlobeView(), MapView(), TimelineView()
             self.telemetry = TelemetryPanel()
+            self.conditions = ConditionsPanel(self.cfg)
 
             top = QSplitter(Qt.Orientation.Horizontal)
             top.addWidget(self._titled("3D VIEW  ·  inertial", self.globe))
-            top.addWidget(self._titled("2D MAP  ·  ground tracks and footprints", self.map))
-            top.setSizes([600, 800])
+            top.addWidget(self._titled("2D MAP  ·  ground tracks  ·  Ctrl/⌘+click moves the ground station", self.map))
+            top.setSizes([560, 720])
             bottom = QWidget()
             bl = QVBoxLayout(bottom)
             bl.setContentsMargins(0, 0, 0, 0)
@@ -111,17 +147,11 @@ def build_window_classes():
             vs.addWidget(bottom)
             vs.setStretchFactor(0, 5)
             vs.setStretchFactor(1, 0)
-            vs.setSizes([700, 190])
+            vs.setSizes([600, 320])
             self.setCentralWidget(vs)
 
-            dock = QDockWidget("TELEMETRY  ·  link budget", self)
-            area = QScrollArea()
-            area.setWidgetResizable(True)
-            area.setWidget(self.telemetry)
-            area.setMinimumWidth(470)
-            dock.setWidget(area)
-            dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
-            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+            self.tele_dock = self._dock("TELEMETRY  ·  link budget", self.telemetry, Qt.DockWidgetArea.RightDockWidgetArea, 470)
+            self.cond_dock = self._dock("CONDITIONS  ·  tinker here", self.conditions, Qt.DockWidgetArea.LeftDockWidgetArea, 400)
 
             self._build_menus()
             self.progress = QProgressBar()
@@ -130,9 +160,19 @@ def build_window_classes():
             self.progress.hide()
             self.statusBar().addPermanentWidget(self.progress)
 
+            self._debounce = QTimer(self)
+            self._debounce.setSingleShot(True)
+            self._debounce.setInterval(450)
+            self._debounce.timeout.connect(self.recompute_from_panel)
+
             self.clock.time_changed.connect(self._on_time)
             self.clock.state_changed.connect(self._on_state)
             self.timeline.seek_requested.connect(self.clock.seek)
+            self.conditions.changed.connect(self._conditions_changed)
+            self.conditions.apply_btn.clicked.connect(self.recompute_from_panel)
+            self.conditions.place_requested.connect(self.place_station)
+            self.conditions.events_requested.connect(self.edit_events)
+            self.map.station_move_requested.connect(self._station_clicked)
 
         # ---------------------------------------------------------------- layout helpers
         @staticmethod
@@ -147,6 +187,18 @@ def build_window_classes():
             lay.addWidget(widget, 1)
             return box
 
+        def _dock(self, title: str, widget: QWidget, area, min_width: int) -> QDockWidget:
+            dock = QDockWidget(title, self)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(widget)
+            scroll.setMinimumWidth(min_width)
+            dock.setWidget(scroll)
+            dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+                             | QDockWidget.DockWidgetFeature.DockWidgetClosable)
+            self.addDockWidget(area, dock)
+            return dock
+
         def _transport_bar(self) -> QWidget:
             bar = QWidget()
             bar.setStyleSheet(f"background: {theme.PANEL_2};")
@@ -157,6 +209,7 @@ def build_window_classes():
             self.btn_play = QPushButton("▶ Play")
             self.btn_play.setMinimumWidth(90)
             self.btn_step = QPushButton("Step ▶")
+            self.btn_pass = QPushButton("Next pass ⏭")
             self.speed = QComboBox()
             for label, value in SPEEDS:
                 self.speed.addItem(label, value)
@@ -169,10 +222,11 @@ def build_window_classes():
             self.btn_back.clicked.connect(lambda: self.clock.step(-1))
             self.btn_step.clicked.connect(lambda: self.clock.step(1))
             self.btn_play.clicked.connect(self.clock.toggle)
+            self.btn_pass.clicked.connect(self.next_pass)
             self.speed.currentIndexChanged.connect(lambda: self.clock.set_speed(self.speed.currentData()))
             self.loop.toggled.connect(lambda v: setattr(self.clock, "loop", v))
             self.clock.set_speed(self.speed.currentData())
-            for w in (self.btn_reset, self.btn_back, self.btn_play, self.btn_step):
+            for w in (self.btn_reset, self.btn_back, self.btn_play, self.btn_step, self.btn_pass):
                 lay.addWidget(w)
             lay.addSpacing(12)
             lay.addWidget(QLabel("Speed"))
@@ -184,21 +238,24 @@ def build_window_classes():
 
         def _build_menus(self) -> None:
             m = self.menuBar().addMenu("&File")
-            act = QAction("Scenario settings...", self)
-            act.setShortcut(QKeySequence("Ctrl+N"))
-            act.triggered.connect(self.edit_scenario)
-            m.addAction(act)
-            act = QAction("Export link data as CSV...", self)
-            act.triggered.connect(self.export_csv)
-            m.addAction(act)
+            for text, key, fn in (("Place ground station (beam origin) ...", "Ctrl+G", self.place_station), ("Random & rare events ...", "Ctrl+E", self.edit_events),
+                                  ("Export beam data as CSV ...", None, self.export_csv)):
+                act = QAction(text, self)
+                if key:
+                    act.setShortcut(QKeySequence(key))
+                act.triggered.connect(fn)
+                m.addAction(act)
             m.addSeparator()
             act = QAction("Quit", self)
             act.setShortcut(QKeySequence.StandardKey.Quit)
             act.triggered.connect(self.close)
             m.addAction(act)
+            m = self.menuBar().addMenu("&View")
+            m.addAction(self.cond_dock.toggleViewAction())
+            m.addAction(self.tele_dock.toggleViewAction())
             m = self.menuBar().addMenu("&Playback")
             for text, key, fn in (("Play / Pause", "Space", self.clock.toggle), ("Step forward", "Right", lambda: self.clock.step(1)),
-                                  ("Step back", "Left", lambda: self.clock.step(-1))):
+                                  ("Step back", "Left", lambda: self.clock.step(-1)), ("Next pass", "N", self.next_pass)):
                 act = QAction(text, self)
                 act.setShortcut(QKeySequence(key))
                 act.triggered.connect(fn)
@@ -209,14 +266,16 @@ def build_window_classes():
             m.addAction(act)
 
         # ---------------------------------------------------------------- running scenarios
-        def start_simulation(self, cfg: SimulationConfig, synchronous: bool = False) -> None:
+        def start_simulation(self, cfg: SimulationConfig, synchronous: bool = False, keep_time: bool = False) -> None:
             """Compute a scenario (in a background thread so the window stays responsive) and show it when done."""
             self.cfg = cfg
             self.clock.pause()
+            self._keep_time = self.clock.t if keep_time and self.result is not None else None
             if synchronous:
                 self.set_result(run_simulation(cfg))
                 return
             if self._thread is not None:
+                self._pending = (cfg, keep_time)       # busy: run this one as soon as the current one finishes
                 return
             self.progress.show()
             self.progress.setValue(0)
@@ -241,10 +300,19 @@ def build_window_classes():
                 self._thread = None
             self.progress.hide()
 
+        def _run_pending(self) -> bool:
+            if self._pending is not None:
+                cfg, keep = self._pending
+                self._pending = None
+                self.start_simulation(cfg, keep_time=keep)
+                return True
+            return False
+
         @Slot(object)
         def _finished(self, result) -> None:
             self._cleanup_thread()
-            self.set_result(result)
+            if not self._run_pending():
+                self.set_result(result)
 
         @Slot(str)
         def _failed(self, message: str) -> None:
@@ -259,38 +327,77 @@ def build_window_classes():
             self.timeline.set_result(result)
             self.telemetry.set_result(result)
             self.clock.configure(result.t_s[-1], result.config.step_s)
-            self._on_time(0.0)
-            self.statusBar().showMessage(f"Scenario ready: {len(result.tracks)} satellites, {result.config.duration_h:g} h at "
-                                         f"{result.config.step_s:g} s steps.  Space = play/pause, ←/→ = step.")
+            t0 = self._keep_time if self._keep_time is not None else self._first_pass_time()
+            self._keep_time = None
+            self.clock.seek(min(t0, result.t_s[-1]))
+            self._on_time(self.clock.t)
+            gs = result.config.ground
+            n_pass = len(result.primary_windows)
+            self.statusBar().showMessage(f"Beam origin: {gs.name} ({gs.lat_deg:+.2f}°, {gs.lon_deg:+.2f}°).  {n_pass} usable pass(es) in {result.config.duration_h:g} h, "
+                                         f"{len(result.events)} event(s).  Space = play/pause, N = next pass, ←/→ = step.")
 
-        def edit_scenario(self) -> None:
-            dlg = ScenarioDialog(self.cfg, self)
+        def _first_pass_time(self) -> float:
+            w = self.result.primary_windows
+            return float(max(0.0, w[0][0] - 120.0)) if len(w) else 0.0
+
+        # ---------------------------------------------------------------- user actions
+        def _conditions_changed(self) -> None:
+            if self.conditions.live.isChecked():
+                self._debounce.start()
+
+        def recompute_from_panel(self) -> None:
+            try:
+                cfg = self.conditions.config(self.cfg)
+                cfg.validate()
+            except ValueError as exc:
+                QMessageBox.warning(self, "Conditions", str(exc))
+                return
+            self.start_simulation(cfg, keep_time=True)
+
+        def place_station(self) -> None:
+            dlg = PlacementDialog(self.cfg.ground, self.cfg.satellites[0].altitude_km, self)
             if dlg.exec():
-                try:
-                    cfg = dlg.config()
-                    cfg.validate()
-                except ValueError as exc:
-                    QMessageBox.warning(self, "Scenario", str(exc))
-                    return
+                cfg = self.conditions.config(self.cfg)
+                cfg.ground = dlg.station()
+                self.conditions.load(cfg)
                 self.start_simulation(cfg)
+
+        def _station_clicked(self, lat: float, lon: float) -> None:
+            cfg = self.conditions.config(self.cfg)
+            cfg.ground = oe.GroundStation("Ground station", lat, lon, 0.0, cfg.ground.min_elevation_deg)
+            self.conditions.load(cfg)
+            self.start_simulation(cfg)
+
+        def edit_events(self) -> None:
+            cfg = self.conditions.config(self.cfg)
+            dlg = EventsDialog(cfg.events, cfg.duration_h, self.result.events if self.result else (), self)
+            if dlg.exec():
+                self.conditions.set_events_config(dlg.config())
+                self.recompute_from_panel()
+
+        def next_pass(self) -> None:
+            if self.result is None or not len(self.result.primary_windows):
+                return
+            w = self.result.primary_windows
+            later = [s for s, e in w if s - 60.0 > self.clock.t]
+            self.clock.seek(max(0.0, (later[0] if later else w[0][0]) - 60.0))
 
         def export_csv(self) -> None:
             if self.result is None:
                 return
-            path, _ = QFileDialog.getSaveFileName(self, "Export link data", "satstk_link.csv", "CSV (*.csv)")
+            path, _ = QFileDialog.getSaveFileName(self, "Export beam data", "satstk_beam.csv", "CSV (*.csv)")
             if path:
                 self.result.write_csv(path)
                 self.statusBar().showMessage(f"Wrote {path}")
 
         def about(self) -> None:
             QMessageBox.information(self, "About satSTK", (
-                f"satSTK {__version__}\n\nA standalone orbital mission and 1550 nm optical inter-satellite link simulator.\n"
+                f"satSTK {__version__}\n\nA standalone simulator for a 1550 nm laser beam from a fixed ground station to a satellite.\n"
                 "Runs locally; no licence, no network, nothing is stored unless you export a CSV.\n\n"
-                "Limits: J2-only orbit model (no drag, no solar pressure, no third-body gravity); Sun position from a short "
-                "analytic formula (about 0.01°); Earth shadow ignores atmospheric refraction; link budget is a "
-                "textbook calculation, not a waveform simulation; the radiator model ignores thermal mass. "
-                "Agreement with Ansys STK or measured hardware has NOT been validated.\n\n"
-                "Land outlines: Natural Earth (public domain)."))
+                "Limits: J2-only orbit model (no drag, no solar pressure, no third-body gravity); Sun position from a short analytic formula; "
+                "the atmosphere, weather and turbulence models are engineering rules of thumb, and the random events are illustrative "
+                "(rates and effects are plausible guesses, not statistics); the link budget is a textbook calculation, not a waveform "
+                "simulation. Agreement with Ansys STK or measured hardware has NOT been validated.\n\nLand outlines: Natural Earth (public domain)."))
 
         # ---------------------------------------------------------------- clock reactions
         def _on_time(self, t: float) -> None:
@@ -319,7 +426,8 @@ def run_gui(args) -> int:
         w, h = (int(v) for v in args.size.lower().split("x"))
         win.resize(w, h)
         win.start_simulation(win.cfg, synchronous=True)
-        win.clock.seek(args.at_hours * 3600.0)
+        if args.at_hours is not None:
+            win.clock.seek(args.at_hours * 3600.0)
         win.show()
         app.processEvents()
         if not win.grab().save(args.screenshot):
@@ -328,7 +436,13 @@ def run_gui(args) -> int:
         print(f"Saved {args.screenshot}")
         return 0
     win.show()
-    win.start_simulation(win.cfg)
+    app.processEvents()
+    if args.lat is None and args.lon is None:
+        win.place_station()                    # first step: put the beam origin on the map; Cancel keeps the default station
+        if win.result is None and win._thread is None:
+            win.start_simulation(win.cfg)
+    else:
+        win.start_simulation(win.cfg)
     return app.exec()
 
 
@@ -344,22 +458,23 @@ def run_selftest(args) -> int:
         app = QApplication.instance() or QApplication(sys.argv[:1])
         theme.apply_dark_theme(app)
         lines.append(f"land outlines: {len(geo.land_rings())} polygons (data file bundled: {len(geo.land_rings()) > 100})")
-        win = MainWindow(config_from_args(parse_args(["--hours", "3"])))
-        win.resize(1300, 800)
+        cfg = config_from_args(parse_args(["--events", "--event-rate", "5", "--step", "30"]))
+        win = MainWindow(cfg)
+        win.resize(1500, 850)
         win.start_simulation(win.cfg, synchronous=True)
-        win.clock.seek(3600.0)
+        res = win.result
+        ok = ok and len(res.primary_windows) > 0
+        win.clock.seek(float(np.mean(res.primary_windows[0])))
         win.show()
         app.processEvents()
-        for name, widget in (("globe", win.globe), ("map", win.map), ("timeline", win.timeline), ("telemetry", win.telemetry)):
+        for name, widget in (("globe", win.globe), ("map", win.map), ("timeline", win.timeline), ("telemetry", win.telemetry), ("conditions", win.conditions)):
             img = widget.grab().toImage()
             arr = np.frombuffer(img.constBits(), dtype=np.uint8).reshape(img.height(), img.bytesPerLine())[:, : img.width() * 4]
             colours = len(np.unique(arr.reshape(-1, 4), axis=0))
             lines.append(f"{name}: {colours} distinct colours")
             ok = ok and colours > 40
         ok = ok and len(geo.land_rings()) > 100
-        link = win.result.primary_link
-        lines.append(f"link windows: {len(win.result.access_windows[(0, 1)])}, locked now: {bool(link.visible[win.result.index_at(3600.0)])}")
-        ok = ok and len(win.result.access_windows[(0, 1)]) > 0
+        lines.append(f"passes: {len(res.primary_windows)}, events: {len(res.events)}, beam now: {res.beam_state(res.index_at(win.clock.t))[0]}")
     except Exception as exc:
         ok = False
         lines.append(f"error: {type(exc).__name__}: {exc}")

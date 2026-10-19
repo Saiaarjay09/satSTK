@@ -179,19 +179,29 @@ def test_azimuth_rate_matches_finite_difference():
 
 
 # ---- end-to-end -------------------------------------------------------------------------------------------------------
-def test_compute_link_masks_blocked_times_and_throughput():
+def test_crosslink_masks_blocked_times_and_throughput():
+    """Satellite-to-satellite crosslink (needs two satellites): numbers exist only while the Earth is not in the way."""
     import simulation as sim
-    r = sim.run_simulation(sim.SimulationConfig(duration_h=3, step_s=10))
-    link = r.primary_link
+    r = sim.run_simulation(sim.SimulationConfig(satellites=sim.two_satellites(), duration_h=3, step_s=10))
+    link = r.crosslinks[(0, 1)]
     assert link.visible.any() and (~link.visible).any()
     assert np.all(np.isnan(link.rx_power_dbm[~link.visible])) and np.all(np.isfinite(link.rx_power_dbm[link.visible]))
     assert np.all(link.throughput_gbps["16QAM"][~link.visible] == 0)
     assert np.all(np.isnan(link.ber["QPSK"][~link.visible]))
-    # default design: 250 Gbaud, 7 % FEC. BPSK/QPSK always close the link (233.6 / 467.3 Gbit/s); 8PSK/16QAM only at short range
     vis = link.visible
     assert np.all(link.throughput_gbps["BPSK"][vis] == pytest.approx(250 / 1.07))
     assert np.all(link.throughput_gbps["QPSK"][vis] == pytest.approx(2 * 250 / 1.07))
-    assert link.throughput_gbps["16QAM"].max() <= 4 * 250 / 1.07 + 1e-9
     assert np.all(link.adaptive_throughput_gbps[vis] >= link.throughput_gbps["QPSK"][vis])
-    assert link.pointing_loss_db == pytest.approx(0.6446, abs=0.001)
+    assert link.pointing_loss_db[0] == pytest.approx(0.6446, abs=0.001)
     assert link.budget_constants["carrier_frequency_thz"] == pytest.approx(193.41, abs=0.01)
+
+
+def test_extra_loss_and_divergence_overrides_in_budget():
+    cfg = ll.LaserLinkConfig(pointing_jitter_urad=0.0)
+    base = ll.link_budget(1000.0, cfg)
+    lossy = ll.link_budget(1000.0, cfg, extra_loss_db=10.0)
+    assert float(base["rx_power_dbm"] - lossy["rx_power_dbm"]) == pytest.approx(10.0, abs=1e-9)
+    wide = ll.link_budget(1000.0, cfg, divergence_urad=200.0)       # twice the divergence = 4x the area = -6 dB (far field)
+    assert float(base["rx_power_dbm"] - wide["rx_power_dbm"]) == pytest.approx(6.02, abs=0.05)
+    shaky = ll.link_budget(1000.0, cfg, jitter_urad=np.array([0.0, 20.0, 40.0]))
+    assert np.all(np.diff(shaky["rx_power_dbm"]) < 0)

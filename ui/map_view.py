@@ -1,13 +1,13 @@
 """
 2D map: equirectangular world map with the day/night shading, sub-satellite ground tracks, coverage footprints, the sub-solar
-point and the laser link between the two sub-satellite points (green = clear, red = blocked by the Earth).
+point and the laser link between the two sub-satellite points .
 """
 from __future__ import annotations
 
 import math
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
@@ -40,6 +40,8 @@ def footprint_polygon(lat_deg: float, lon_deg: float, rho_rad: float, n: int = 9
 
 
 class MapView(QWidget):
+    station_move_requested = Signal(float, float)     # Ctrl/Cmd + click on the map
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(320, 180)
@@ -81,6 +83,11 @@ class MapView(QWidget):
         else:
             self._cursor = None
         self.update()
+
+    def mousePressEvent(self, ev) -> None:
+        mods = ev.modifiers()
+        if ev.button() == Qt.MouseButton.LeftButton and self._cursor and (mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier)):
+            self.station_move_requested.emit(round(self._cursor[0], 3), round(self._cursor[1], 3))
 
     def leaveEvent(self, ev) -> None:
         self._cursor = None
@@ -209,16 +216,34 @@ class MapView(QWidget):
         p.setPen(QColor(255, 210, 60))
         p.drawText(QPointF(float(sx) + 9, float(sy) + 4), "Sun")
 
-        # laser link between sub-satellite points
-        a, b = res.primary_pair
-        la, lb = res.tracks[a], res.tracks[b]
-        link = res.primary_link
-        xa, ya = self._xy(box, la.lon_deg[i], la.lat_deg[i])
-        xb, yb = self._xy(box, lb.lon_deg[i], lb.lat_deg[i])
-        if abs(la.lon_deg[i] - lb.lon_deg[i]) < 180.0:
-            locked = bool(link.visible[i])
-            p.setPen(QPen(QColor(theme.GREEN) if locked else QColor(theme.RED), 1.8, Qt.PenStyle.SolidLine if locked else Qt.PenStyle.DashLine))
-            p.drawLine(QPointF(float(xa), float(ya)), QPointF(float(xb), float(yb)))
+        # ground station, its elevation-mask coverage circle, and the beam to the sub-satellite point of the target
+        gs = res.config.ground
+        tgt = res.target
+        state, reason = res.beam_state(i)
+        beam_color = {"locked": QColor(theme.GREEN), "degraded": QColor(theme.AMBER), "blocked": QColor(theme.RED)}[state]
+        alt = float(np.mean(res.tracks[tgt].alt_km))
+        mask_lon, mask_lat = footprint_polygon(gs.lat_deg, gs.lon_deg, math.radians(oe.horizon_cap_radius_deg(alt, gs.min_elevation_deg)))
+        p.save()
+        p.setClipRect(box)
+        p.setPen(QPen(QColor(theme.GREEN), 1.2, Qt.PenStyle.DashLine))
+        p.setBrush(QColor(46, 204, 113, 22))
+        for shift in (-360.0, 0.0, 360.0):
+            x, y = self._xy(box, mask_lon + shift, mask_lat)
+            p.drawPolygon(QPolygonF([QPointF(a_, b_) for a_, b_ in zip(x, y)]))
+        p.restore()
+        tl, tn = res.tracks[tgt].lat_deg[i], res.tracks[tgt].lon_deg[i]
+        gx, gy = self._xy(box, gs.lon_deg, gs.lat_deg)
+        sx_, sy_ = self._xy(box, tn, tl)
+        if abs(gs.lon_deg - tn) < 180.0:
+            p.setPen(QPen(beam_color, 1.8, Qt.PenStyle.DashLine if state == "blocked" else Qt.PenStyle.SolidLine))
+            p.drawLine(QPointF(float(gx), float(gy)), QPointF(float(sx_), float(sy_)))
+        p.setBrush(QColor(theme.GREEN))
+        p.setPen(QPen(QColor("white"), 1.4))
+        gx, gy = float(gx), float(gy)
+        p.drawPolygon(QPolygonF([QPointF(gx, gy - 8), QPointF(gx - 6.5, gy + 4.5), QPointF(gx + 6.5, gy + 4.5)]))
+        p.setPen(QColor(theme.GREEN))
+        p.setFont(theme.mono_font(9))
+        p.drawText(QPointF(gx + 9, gy + 14), gs.name)
 
         label_font = p.font()
         label_font.setBold(True)
