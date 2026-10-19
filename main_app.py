@@ -28,6 +28,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--hours", type=float, default=24.0, help="scenario length in hours (default 24)")
     ap.add_argument("--step", type=float, default=10.0, help="time step in seconds: 1 or 10 (default 10)")
     ap.add_argument("--start", default="2026-12-21T00:00:00", help="scenario start, UTC, ISO format (default 2026-12-21T00:00:00)")
+    ap.add_argument("--selftest", action="store_true", help="build the window offscreen, render every pane, print SELFTEST OK (used to test the packaged app)")
+    ap.add_argument("--selftest-file", metavar="FILE", help="with --selftest: also write the result to this file")
     ap.add_argument("--version", action="version", version=f"satSTK {__version__}")
     return ap.parse_args(argv)
 
@@ -330,8 +332,51 @@ def run_gui(args) -> int:
     return app.exec()
 
 
+def run_selftest(args) -> int:
+    """Smoke test for the packaged app: bundled data, Qt, the engines and every pane must all work. Needs no display."""
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    lines, ok = [], True
+    try:
+        import numpy as np
+        QApplication, MainWindow, theme = build_window_classes()
+        from ui import geo
+        app = QApplication.instance() or QApplication(sys.argv[:1])
+        theme.apply_dark_theme(app)
+        lines.append(f"land outlines: {len(geo.land_rings())} polygons (data file bundled: {len(geo.land_rings()) > 100})")
+        win = MainWindow(config_from_args(parse_args(["--hours", "3"])))
+        win.resize(1300, 800)
+        win.start_simulation(win.cfg, synchronous=True)
+        win.clock.seek(3600.0)
+        win.show()
+        app.processEvents()
+        for name, widget in (("globe", win.globe), ("map", win.map), ("timeline", win.timeline), ("telemetry", win.telemetry)):
+            img = widget.grab().toImage()
+            arr = np.frombuffer(img.constBits(), dtype=np.uint8).reshape(img.height(), img.bytesPerLine())[:, : img.width() * 4]
+            colours = len(np.unique(arr.reshape(-1, 4), axis=0))
+            lines.append(f"{name}: {colours} distinct colours")
+            ok = ok and colours > 40
+        ok = ok and len(geo.land_rings()) > 100
+        link = win.result.primary_link
+        lines.append(f"link windows: {len(win.result.access_windows[(0, 1)])}, locked now: {bool(link.visible[win.result.index_at(3600.0)])}")
+        ok = ok and len(win.result.access_windows[(0, 1)]) > 0
+    except Exception as exc:
+        ok = False
+        lines.append(f"error: {type(exc).__name__}: {exc}")
+    lines.append("SELFTEST OK" if ok else "SELFTEST FAILED")
+    text = "\n".join(lines)
+    if sys.stdout is not None:
+        print(text)
+    if args.selftest_file:
+        with open(args.selftest_file, "w") as fh:
+            fh.write(text + "\n")
+    return 0 if ok else 1
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
+    if args.selftest:
+        return run_selftest(args)
     return run_headless(args) if args.headless else run_gui(args)
 
 

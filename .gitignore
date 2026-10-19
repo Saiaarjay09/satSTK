@@ -5,3 +5,7 @@ venv/
 .venv/
 *.csv
 data/de421.bsp
+build/
+dist/
+installer/
+*.dmg

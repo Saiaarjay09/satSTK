@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from functools import lru_cache
 from pathlib import Path
 
@@ -9,7 +10,9 @@ import numpy as np
 from PySide6.QtCore import QPointF
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPolygonF
 
-LAND_FILE = Path(__file__).resolve().parent.parent / "data" / "land_110m.json"
+# In a PyInstaller build the data folder sits next to the bundled modules (sys._MEIPASS); from source it is next to this package.
+_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+LAND_FILE = _ROOT / "data" / "land_110m.json"
 
 
 @lru_cache(maxsize=1)

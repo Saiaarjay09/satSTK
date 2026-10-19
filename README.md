@@ -10,7 +10,13 @@ no internet and no account**, and stores nothing unless you export a CSV.
 
 *(Screenshot rendered by the app itself with `--screenshot`.)*
 
-## Run it (macOS)
+## Download the app (no Python needed)
+
+The **Releases** page has a `.dmg` for Apple-silicon Macs (drag satSTK into Applications) and a `-setup.exe` installer for 64-bit Windows 10/11. The apps are
+unsigned, so the first launch shows a warning: on a Mac use **System Settings → Privacy & Security → Open Anyway**; on Windows press **More info → Run anyway**.
+The macOS app was tested on a real Mac; the Windows installer is built and smoke-tested by GitHub Actions but has not been run on a real PC by the author.
+
+## Run it from source (macOS)
 
 You need Python 3.10 or newer (`python3 --version` to check; get it from python.org if missing). Then, in Terminal, from this folder:
 
@@ -57,8 +63,9 @@ No window? `python main_app.py --headless` prints a text summary (`--csv out.csv
 | `ui/` | The Qt widgets: globe, map, timeline, telemetry dock, scenario dialog, playback clock, dark theme. |
 | `data/land_110m.json` | Land outlines from Natural Earth (public domain), 76 KB. |
 | `tests/` | 73 automated tests (see below). |
+| `satstk_app.spec`, `satstk_app.iss` | Packaging recipes (PyInstaller; Inno Setup for the Windows installer). `.github/workflows/app-release.yml` builds both apps and publishes a release when a `v*` tag is pushed. |
 
-Requirements are only `numpy`, `scipy`, `skyfield`, `PySide6`, `pyqtgraph` (`requirements-dev.txt` adds `pytest`). Skyfield is used for its built-in time scale (leap seconds, Earth rotation angle), which works offline. The Sun position uses a short analytic formula, so **no ephemeris file is ever downloaded**. (Plotly is not used.)
+Requirements are only `numpy`, `scipy`, `skyfield`, `PySide6-Essentials`, `pyqtgraph` (`requirements-dev.txt` adds `pytest`; `PySide6-Essentials` is the lighter Qt package, the full `PySide6` also works). Skyfield is used for its built-in time scale (leap seconds, Earth rotation angle), which works offline. The Sun position uses a short analytic formula, so **no ephemeris file is ever downloaded**. (Plotly is not used.)
 
 ## The physics in plain words
 

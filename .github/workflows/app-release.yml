@@ -1,0 +1,119 @@
+# Builds the satSTK desktop application for macOS (Apple silicon) and Windows (64-bit), smoke-tests the packaged app by actually
+# starting it, and, when you push a version tag such as v0.2.0, publishes a GitHub Release with both downloads.
+# Run it by hand (Actions tab -> "Build satSTK desktop app" -> Run workflow) to get the files as artifacts only.
+name: Build satSTK desktop app
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: macos-arm64
+          - os: windows-latest
+            label: windows-x64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Work out the version
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.0-dev"; fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt pyinstaller
+
+      - name: Tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+
+      - name: Package the app
+        run: python -m PyInstaller --noconfirm satstk_app.spec
+
+      - name: Smoke-test the packaged app (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          out=$("dist/satSTK.app/Contents/MacOS/satSTK" --selftest 2>&1); code=$?
+          echo "$out"
+          [[ $code -eq 0 && "$out" == *"SELFTEST OK"* ]]
+
+      - name: Smoke-test the packaged app (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process "dist\satSTK\satSTK.exe" -ArgumentList "--selftest","--selftest-file","selftest_app.txt" -Wait -PassThru
+          $log = (Get-Content selftest_app.txt -ErrorAction SilentlyContinue) -join " "
+          if ($p.ExitCode -ne 0 -or $log -notmatch "SELFTEST OK") { Write-Output "::error::exit $($p.ExitCode): $log"; throw "satSTK.exe --selftest failed" }
+          Write-Output $log
+
+      - name: Make the macOS disk image
+        if: runner.os == 'macOS'
+        run: |
+          mkdir stage
+          cp -R "dist/satSTK.app" stage/
+          ln -s /Applications stage/Applications
+          hdiutil create -volname "satSTK" -srcfolder stage -ov -format UDZO "satSTK-${VERSION}-macos-arm64.dmg"
+
+      - name: Install Inno Setup (Windows)
+        if: runner.os == 'Windows'
+        run: choco install innosetup --no-progress -y
+
+      - name: Make the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler not found" }
+          & $iscc "/DAppVersion=$env:VERSION" satstk_app.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          Move-Item installer\*.exe .
+          Get-ChildItem satSTK-*-setup.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: satstk-${{ matrix.label }}
+          path: |
+            satSTK-*.dmg
+            satSTK-*-setup.exe
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: files
+          merge-multiple: true
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la files
+          gh release create "$GITHUB_REF_NAME" files/* --title "satSTK ${GITHUB_REF_NAME#v}" --notes-file RELEASE_NOTES.md
