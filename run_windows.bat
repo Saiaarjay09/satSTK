@@ -1,5 +1,5 @@
 @echo off
-rem Setu launcher for Windows: sets up a private Python environment the first time, then runs the STK automation.
+rem satSTK launcher for Windows: sets up a private Python environment the first time, then runs the STK automation.
 rem Double-click it, or run it from PowerShell. Extra options are passed through, e.g.  run_windows.bat --offline-preview
 setlocal
 cd /d "%~dp0"
@@ -27,12 +27,12 @@ if errorlevel 1 (
   if defined WHEEL (
     python -m pip install "%WHEEL%"
   ) else (
-    python setu_stk.py --offline-preview
+    python satstk.py --offline-preview
     pause
     exit /b 0
   )
 )
 
-python setu_stk.py %*
+python satstk.py %*
 echo.
 pause

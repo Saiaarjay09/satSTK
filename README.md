@@ -1,9 +1,9 @@
-# Setu: STK automation for the orbital laser crosslink
+# satSTK: STK automation for the orbital laser crosslink
 
-*Setu* is Sanskrit for "bridge": here, the laser bridge between two orbiting compute nodes. It is part of the Orbital AI Datacentre
+*satSTK* is the satellite-link companion to [satCAD](https://github.com/Saiaarjay09/satCAD): satCAD designs the spacecraft, satSTK simulates its orbit, eclipses and laser crosslink in Ansys STK. It is part of the Orbital AI Datacentre
 project (the [Orbital-Datacentre](https://github.com/Saiaarjay09/Orbital-Datacentre) repository holds the optical-channel simulator).
 
-`setu_stk.py` drives **Ansys STK** (Systems Tool Kit) from Python. It builds a 24-hour scenario with two 600 km Sun-synchronous
+`satstk.py` drives **Ansys STK** (Systems Tool Kit) from Python. It builds a 24-hour scenario with two 600 km Sun-synchronous
 satellites (**Orbital-Node-Alpha**, **Orbital-Node-Beta**), reports **when Alpha is in sunlight, penumbra and umbra** (the cases the
 mechanically pumped fluid loop must survive), fits Alpha with a **1550 nm laser transmitter** and Beta with a **laser receiver**
 (100 microradian beam), computes the **line-of-sight access** between them, and extracts **received power, BER and latency**
@@ -20,14 +20,14 @@ Go to the **Releases** page and take the zip for your computer:
 
 | Download | For |
 |---|---|
-| `Setu-STK-<version>-windows.zip` | Windows with STK installed. Unzip and double-click `run_windows.bat` |
-| `Setu-STK-<version>-macos.zip` | Mac or Linux. STK's desktop app does not run on macOS, so this runs the **offline preview** (double-click `run_preview_mac.command`) |
+| `satSTK-<version>-windows.zip` | Windows with STK installed. Unzip and double-click `run_windows.bat` |
+| `satSTK-<version>-macos.zip` | Mac or Linux. STK's desktop app does not run on macOS, so this runs the **offline preview** (double-click `run_preview_mac.command`) |
 
 ## What is in this repository, file by file
 
 ```
 STK/
-├── setu_stk.py              the program: orbit maths, the preview, and every STK call
+├── satstk.py              the program: orbit maths, the preview, and every STK call
 ├── README.md                this guide
 ├── requirements.txt         the Python libraries needed (numpy, pytest)
 ├── RELEASE_NOTES.md         the text shown on each GitHub release page
@@ -35,12 +35,12 @@ STK/
 ├── run_preview_mac.command  one-click launcher for macOS / Linux (offline preview)
 ├── .gitignore               keeps results, virtual environments and caches out of git
 ├── tests/
-│   └── test_setu_stk.py     the automated checks
+│   └── test_satstk.py     the automated checks
 └── .github/workflows/
     └── release.yml          the automatic release builder
 ```
 
-### `setu_stk.py` (the program)
+### `satstk.py` (the program)
 
 One file, in four layers. The settings are the upper-case numbers in the block at the top; nothing else needs editing to change the design.
 
@@ -83,14 +83,14 @@ comes as a file inside your STK installation (see below).
 
 ### `run_windows.bat`
 Double-click launcher for Windows. The first time it creates a private Python environment (`.venv`), installs `requirements.txt`, checks for
-the STK Python API (asking for the path of the `.whl` file if it is missing, or offering the offline preview instead), then runs `setu_stk.py`.
+the STK Python API (asking for the path of the `.whl` file if it is missing, or offering the offline preview instead), then runs `satstk.py`.
 Any options you type after it are passed on, e.g. `run_windows.bat --engine`.
 
 ### `run_preview_mac.command`
-Double-click launcher for macOS / Linux. It makes the same private environment and runs `setu_stk.py --offline-preview`. (STK's desktop app is
+Double-click launcher for macOS / Linux. It makes the same private environment and runs `satstk.py --offline-preview`. (STK's desktop app is
 Windows-only, so a Mac can run the preview but not STK.) If macOS refuses to open it the first time, right-click it and choose **Open**.
 
-### `tests/test_setu_stk.py`
+### `tests/test_satstk.py`
 Twelve automated checks, run with `python -m pytest`. They cover: the Sun-synchronous inclination against textbook values (97.79 degrees at
 600 km); the Sun's position and the local-time-to-RAAN conversion; date formatting; that the preview orbit is circular with the right period;
 that eclipse lasts about 35 minutes per orbit and the line of sight is genuinely intermittent; that the Earth blocks a link through its centre; the
@@ -125,7 +125,7 @@ python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 pip install "C:\Program Files\AGI\STK 12\bin\AgPythonAPI\agi.stk12-<version>-py3-none-any.whl"   # use the real file name on your PC
-python setu_stk.py
+python satstk.py
 ```
 
 Results are written to `stk_output\`:
@@ -138,7 +138,7 @@ Results are written to `stk_output\`:
 | `transmitter_attributes.txt`, `receiver_attributes.txt` | every setting STK exposes for the two laser objects |
 | `Orbital_AI_Datacentre.sc` | the scenario, which you can open in STK |
 
-Run the offline preview first, even on a Mac: `python setu_stk.py --offline-preview` prints the Sun-synchronous inclination, Alpha's eclipse
+Run the offline preview first, even on a Mac: `python satstk.py --offline-preview` prints the Sun-synchronous inclination, Alpha's eclipse
 passes (about 35 minutes of shadow every 96.7-minute orbit at this altitude) and the line-of-sight windows (about 18 minutes at a time, 4,300 to
 5,200 km range with the default offsets). Agreement with STK within a few minutes is the sanity check.
 

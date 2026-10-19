@@ -1,4 +1,4 @@
-"""Tests for setu_stk.py: the orbit maths and the STK plumbing, using a stand-in for STK."""
+"""Tests for satstk.py: the orbit maths and the STK plumbing, using a stand-in for STK."""
 import math
 import sys
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import setu_stk as m  # noqa: E402
+import satstk as m  # noqa: E402
 
 
 class FakeResult:

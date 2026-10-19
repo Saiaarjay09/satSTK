@@ -20,7 +20,7 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install -r requirements.txt
       - run: python -m pytest -q
-      - run: python setu_stk.py --offline-preview
+      - run: python satstk.py --offline-preview
 
   package:
     needs: test
@@ -30,16 +30,16 @@ jobs:
       - name: Build the two downloads
         run: |
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.0-dev"; fi
-          common="setu_stk.py requirements.txt README.md tests"
+          common="satstk.py requirements.txt README.md tests"
           mkdir -p dist
-          rm -rf stage && mkdir -p "stage/Setu-STK-$V-windows" && cp -r $common run_windows.bat "stage/Setu-STK-$V-windows/"
-          rm -rf stage2 && mkdir -p "stage2/Setu-STK-$V-macos" && cp -r $common run_preview_mac.command "stage2/Setu-STK-$V-macos/"
-          (cd stage && zip -qr "../dist/Setu-STK-$V-windows.zip" "Setu-STK-$V-windows")
-          (cd stage2 && zip -qr "../dist/Setu-STK-$V-macos.zip" "Setu-STK-$V-macos")
-          unzip -l "dist/Setu-STK-$V-macos.zip"
+          rm -rf stage && mkdir -p "stage/satSTK-$V-windows" && cp -r $common run_windows.bat "stage/satSTK-$V-windows/"
+          rm -rf stage2 && mkdir -p "stage2/satSTK-$V-macos" && cp -r $common run_preview_mac.command "stage2/satSTK-$V-macos/"
+          (cd stage && zip -qr "../dist/satSTK-$V-windows.zip" "satSTK-$V-windows")
+          (cd stage2 && zip -qr "../dist/satSTK-$V-macos.zip" "satSTK-$V-macos")
+          unzip -l "dist/satSTK-$V-macos.zip"
       - uses: actions/upload-artifact@v4
         with:
-          name: setu-downloads
+          name: satstk-downloads
           path: dist/*.zip
           if-no-files-found: error
 
@@ -53,9 +53,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: setu-downloads
+          name: satstk-downloads
           path: dist
-      - name: Publish the release
+      - name: Publish the release (replacing any earlier release for this tag)
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.zip --title "Setu-STK ${GITHUB_REF_NAME#v}" --notes-file RELEASE_NOTES.md
+        run: |
+          gh release delete "$GITHUB_REF_NAME" --yes --repo "$GITHUB_REPOSITORY" || true
+          gh release create "$GITHUB_REF_NAME" dist/*.zip --title "satSTK ${GITHUB_REF_NAME#v}" --notes-file RELEASE_NOTES.md --repo "$GITHUB_REPOSITORY"

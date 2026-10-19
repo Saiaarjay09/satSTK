@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SETU: STK ORBIT + ECLIPSE + OPTICAL INTER-SATELLITE LINK (OISL) AUTOMATION
+satSTK: STK ORBIT + ECLIPSE + OPTICAL INTER-SATELLITE LINK (OISL) AUTOMATION
 ==========================================================================================
 Drives Ansys STK (Systems Tool Kit) from Python to
   1. create a 24-hour scenario with two 600 km Sun-synchronous satellites (Orbital-Node-Alpha / -Beta),
@@ -18,9 +18,9 @@ READ THIS FIRST (honest status)
     J2 plane drift, cylindrical Earth shadow) so you can sanity-check the geometry, the eclipse times and the line-of-sight
     pattern before opening STK, and compare them with STK's answers afterwards.
 
-Run:   python setu_stk.py                  (STK desktop, window visible)
-       python setu_stk.py --engine         (STK Engine, no window)
-       python setu_stk.py --offline-preview
+Run:   python satstk.py                  (STK desktop, window visible)
+       python satstk.py --engine         (STK Engine, no window)
+       python satstk.py --offline-preview
 All results are written to ./stk_output/ (CSV files, raw reports and the STK scenario).
 """
 from __future__ import annotations
