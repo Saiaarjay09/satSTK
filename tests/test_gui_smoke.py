@@ -20,6 +20,7 @@ def window():
     theme.apply_dark_theme(app)
     win = MainWindow(direct_cfg(duration_h=24, step_s=30))
     win.resize(1700, 950)
+    win.conditions.live.setChecked(False)                                                # no background recomputes while the tests drive the panels
     win.start_simulation(win.cfg, synchronous=True)
     win.show()
     app.processEvents()
@@ -267,3 +268,157 @@ def test_default_cli_summary_shows_the_relay(capsys):
     assert "GEO relay network ON" in out and "GS-INDIA" in out
     assert main_app.main(["--headless", "--no-geo-relay"]) == 0
     assert "GEO relay network OFF" in capsys.readouterr().out
+
+
+# ---- Optical payload transmitter dock ------------------------------------------------------------------------------------------
+def _wait_for_worker(panel, app, seconds=60):
+    import time
+    t0 = time.time()
+    while panel._thread is not None and time.time() - t0 < seconds:
+        app.processEvents()
+        time.sleep(0.01)
+    app.processEvents()
+    assert panel._thread is None, "payload worker never finished"
+
+
+def test_payload_dock_exists_tabbed_with_telemetry_and_follows_the_clock(window):
+    win, app = window
+    default = sim.SimulationConfig()                                                     # default scenario: relays on
+    win.conditions.load(default)
+    win.start_simulation(default, synchronous=True)
+    win.show()
+    assert win.payload_dock in win.tabifiedDockWidgets(win.tele_dock)
+    win.clock.seek(float(win.result.t_s[int(np.argmax(win.result.route.kind == 3))]))
+    app.processEvents()
+    assert "GEO-ATL" in win.payload.route_note.text() or "GEO-PAC" in win.payload.route_note.text()
+    assert win.payload.route_combo.count() == 1 + len(win.result.route.labels)
+    assert any(win.payload.route_combo.itemText(k).startswith("✗") for k in range(1, win.payload.route_combo.count()))   # unavailable routes are marked
+    assert any(win.payload.route_combo.itemText(k).startswith("✓") for k in range(1, win.payload.route_combo.count()))
+
+
+def test_generate_63kb_button_loads_the_test_payload(window):
+    win, app = window
+    p = win.payload
+    p.gen_btn.click()
+    assert p.rb_file.isChecked() and len(p._file_bytes) == 64512 and "63" in p.file_label.text() or "64,512" in p.file_label.text()
+    assert pl_verify(p._file_bytes)
+    data, name = p.current_payload()
+    assert len(data) == 64512 and "generated" in name and p.save_btn.isEnabled()
+
+
+def pl_verify(data):
+    from dsp import payload
+    return payload.verify_blocks(data).n_bad == 0
+
+
+def test_fire_text_payload_through_the_worker_thread_and_see_every_view(window):
+    win, app = window
+    p = win.payload
+    win.clock.seek(float(win.result.t_s[int(np.argmax(win.result.route.kind == 2))]))
+    p.rb_text.setChecked(True)
+    p.text.setPlainText("Fired from the GUI test: GS-INDIA to NODE-ALPHA.")
+    p.mod.setCurrentText("QPSK")
+    p.rate.setValue(10.0)
+    p.seed.setValue(4)
+    p.fire.click()
+    assert not p.fire.isEnabled() and p.cancel_btn.isEnabled()                              # running in a background thread
+    _wait_for_worker(p, app)
+    assert p.fire.isEnabled() and "PASS" in p.badge.text()
+    assert p.last.crc_ok and p.last.recovered == p.text.toPlainText().encode()
+    assert p.m["route"].text() == "GS-INDIA -> GEO-IND -> NODE-ALPHA" and "QPSK" in p.m["mod"].text() and p.m["ber"].text().startswith("0")
+    assert p.diff_tx.toPlainText() == p.diff_rx.toPlainText() == p.text.toPlainText()
+    for tab in range(3):
+        p.tabs.setCurrentIndex(tab)
+        app.processEvents()
+        assert _colors(p.tabs.currentWidget()) > 20
+
+
+def test_fire_the_63kb_payload_adaptively_and_see_the_block_report(window):
+    win, app = window
+    p = win.payload
+    win.clock.seek(float(win.result.t_s[int(np.argmax(win.result.route.kind == 3))]))
+    p.gen_btn.click()
+    p.mod.setCurrentText("Auto-Adaptive")
+    p.seed.setValue(5)
+    p.fire.click()
+    _wait_for_worker(p, app)
+    assert "PASS" in p.badge.text() and p.last.blocks.n_bad == 0 and p.m["blocks"].text().startswith("0 of 1008")
+    assert p.last.modulation in ("8PSK", "QPSK", "16QAM", "BPSK") and "auto:" in p.m["mod"].text()
+
+
+def test_fsm_open_loop_and_forced_route_in_the_gui(window):
+    win, app = window
+    p = win.payload
+    p.rb_text.setChecked(True)
+    p.text.setPlainText("no mirror, no data")
+    p.mod.setCurrentText("QPSK")
+    p.fsm.setChecked(False)
+    p.fire.click()
+    _wait_for_worker(p, app)
+    assert "FAIL" in p.badge.text() and not p.last.sync_ok
+    p.fsm.setChecked(True)
+    k = next(k for k in range(1, p.route_combo.count()) if p.route_combo.itemText(k).startswith("✗"))
+    p.route_combo.setCurrentIndex(k)                                                        # a route with no line of sight right now
+    p.fire.click()
+    _wait_for_worker(p, app)
+    assert "no line of sight" in p.status.text() or "RouteUnavailable" in p.status.text()
+    p.route_combo.setCurrentIndex(0)
+
+
+def test_streaming_from_the_gui_fills_the_log_and_shows_handovers(window):
+    win, app = window
+    p = win.payload
+    win.clock.seek(float(win.result.direct_windows[0][0][0]) - 1800.0)
+    p.gen_btn.click()
+    p.stream_on.setChecked(True)
+    p.frame_bytes.setValue(2048)
+    p.stream_min.setValue(60.0)
+    p.mod.setCurrentText("Auto-Adaptive")
+    p.rate.setValue(40.0)
+    p.seed.setValue(6)
+    p.fire.click()
+    _wait_for_worker(p, app, seconds=120)
+    assert "STREAM" in p.badge.text() and p.table.rowCount() == 32 and p.tabs.currentIndex() == 3
+    assert "make-before-break" in p.stream_summary.text() and "MATCHES" in p.stream_summary.text()
+    assert all(p.table.item(r, 5).text() == "OK" for r in range(32))
+    assert _colors(p.stream_plot) > 20
+    p.stream_on.setChecked(False)
+
+
+def test_diff_view_highlights_exactly_the_wrong_bytes(window):
+    win, app = window
+    from ui.payload_panel import DiffView
+    v = DiffView()
+    sent = b"hello world, hello orbit"
+    got = bytearray(sent)
+    got[4] ^= 0x01
+    wrong = np.frombuffer(sent, dtype=np.uint8) != np.frombuffer(bytes(got), dtype=np.uint8)
+    v.show_bytes(bytes(got), wrong, hexdump=False)
+    text = v.toPlainText()
+    assert text[:4] == "hell" and text[4] == "n" and text[5:] == " world, hello orbit"
+    sel = []
+    cur = v.textCursor()
+    for pos in range(len(text)):
+        cur.setPosition(pos + 1)                                                          # the char format reported is that of the character just before the cursor
+        sel.append(cur.charFormat().background().color().name() != "#000000")
+    assert sel.count(True) == 1 and sel[4]
+    v.show_bytes(sent, None, hexdump=True)
+    assert v.toPlainText().startswith("68 65 6c 6c 6f")
+
+
+def test_cli_transmit_modes(tmp_path, capsys):
+    f = tmp_path / "payload.bin"
+    f.write_bytes(bytes(range(256)) * 4)
+    assert main_app.main(["--send-file", str(f), "--at-hours", "2.5", "--dsp-rate", "10"]) == 0
+    out = capsys.readouterr().out
+    assert "CRC-32 PASS" in out and "GS-INDIA" in out and "1,024 bytes" in out
+    assert main_app.main(["--send-text", "x" * 50, "--at-hours", "2.5", "--no-fsm"]) == 1
+    assert "CRC-32 FAIL" in capsys.readouterr().out
+    assert main_app.main(["--send-test-payload", "--stream", "--at-hours", "0", "--stream-minutes", "60", "--frame-bytes", "4096"]) == 0
+    assert "frames delivered" in capsys.readouterr().out
+
+
+def test_screenshot_with_the_payload_fired_into_the_dock(tmp_path):
+    out = tmp_path / "p.png"
+    assert main_app.main(["--screenshot", str(out), "--send-test-payload", "--at-hours", "2.5", "--size", "1900x1000"]) == 0
+    assert out.stat().st_size > 50_000

@@ -16,7 +16,7 @@ import argparse
 import sys
 from datetime import datetime, timezone
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -42,6 +42,17 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--hours", type=float, default=24.0, help="scenario length in hours (default 24)")
     g.add_argument("--step", type=float, default=10.0, help="time step in seconds: 1 or 10 (default 10)")
     g.add_argument("--start", default="2026-12-21T00:00:00", help="scenario start, UTC, ISO format (default 2026-12-21T00:00:00)")
+    d = ap.add_argument_group("payload transmission (symbol-level optical DSP through the live simulation)")
+    d.add_argument("--send-text", metavar="TEXT", help="transmit this text through the simulated optical link at --at-hours and print the result")
+    d.add_argument("--send-file", metavar="FILE", help="transmit this file instead")
+    d.add_argument("--send-test-payload", action="store_true", help="transmit the generated 63 KB self-checking test payload (with --screenshot: fire it into the dock first)")
+    d.add_argument("--mod", default="Auto-Adaptive", help="BPSK, QPSK, 8PSK, 16QAM or Auto-Adaptive (default)")
+    d.add_argument("--dsp-rate", type=float, default=10.0, help="DSP symbol rate in Gbaud (default 10; the budget's 250 Gbaud has no FEC here)")
+    d.add_argument("--route", type=int, default=-1, help="force a route by candidate number instead of the active one (see the dock's list)")
+    d.add_argument("--no-fsm", action="store_true", help="open-loop receiver: Fast Steering Mirror off")
+    d.add_argument("--stream", action="store_true", help="stream the payload frame by frame over --stream-minutes of orbit instead of one shot")
+    d.add_argument("--frame-bytes", type=int, default=1024, help="frame size for --stream")
+    d.add_argument("--stream-minutes", type=float, default=120.0, help="simulated time the stream is spread over")
     ap.add_argument("--version", action="version", version=f"satSTK {__version__}")
     return ap.parse_args(argv)
 
@@ -83,6 +94,46 @@ def run_headless(args) -> int:
     return 0
 
 
+def run_transmit(args) -> int:
+    """Headless: run the scenario, then fire a payload through the route in force at --at-hours and print what came back."""
+    from optical_dsp_bridge import OrbitalOpticalTransceiver, RouteUnavailable
+    from dsp import payload as pl
+    from simulation import run_simulation
+    result = run_simulation(config_from_args(args))
+    trx = OrbitalOpticalTransceiver(result)
+    if args.send_file:
+        data = open(args.send_file, "rb").read()
+    elif args.send_text is not None:
+        data = args.send_text.encode("utf-8")
+    else:
+        data = pl.generate_test_payload()
+    idx = result.index_at((args.at_hours or 0.0) * 3600.0)
+    forced = None if args.route < 0 else args.route
+    rt = result.route
+    print(f"Time T+{result.t_s[idx] / 3600:.3f} h; active route: {rt.label(idx)}; payload {len(data):,} bytes")
+    try:
+        if args.stream:
+            s = trx.stream(data, idx, args.stream_minutes * 60.0, args.frame_bytes, args.mod, args.dsp_rate, closed_loop=not args.no_fsm)
+            for r in s.frames:
+                print(f"  frame {r.k + 1:3d} T+{r.time_s / 60:7.1f} min {r.route_label:42s} {r.modulation:6s} {'OK  ' if r.ok else 'LOST'}"
+                      + ("  <handover" + (", hitless>" if r.hitless else ", NOT hitless>") if r.handover else ""))
+            print(f"Stream: {s.frames_ok}/{len(s.frames)} frames delivered, {s.frame_loss_pct:.1f} % lost, {s.handovers} route changes "
+                  f"({'all hitless' if s.all_handovers_hitless else 'some not hitless'}), whole-file CRC {'OK' if s.stream_crc_ok else 'MISMATCH'}")
+            return 0 if s.frames_lost == 0 else 1
+        out = trx.send(data, idx, args.mod, args.dsp_rate, closed_loop=not args.no_fsm, candidate=forced, seed=1)
+    except RouteUnavailable as exc:
+        print(f"Cannot transmit: {exc}")
+        return 2
+    print(f"Route {out.route_label}; modulation {out.modulation}" + (f" (auto: {out.adaptive_reason})" if out.adaptive_table else ""))
+    print(f"CRC-32 {'PASS' if out.crc_ok else 'FAIL'}; BER {out.ber if out.ber is None else format(out.ber, '.3e')}; bytes wrong {out.bytes_wrong} ({out.bytes_wrong_pct:.2f} %); "
+          f"frame loss {out.frame_loss_pct:.0f} %; status: {out.status}")
+    print(f"Latency {out.latency_ms:.3f} ms (propagation {out.propagation_ms:.3f}, serialisation {out.serialization_ms:.4f}, processing {out.processing_ms:.3f}); "
+          f"PAT lock {'-' if out.pat_ms is None else format(out.pat_ms, '.2f') + ' ms'}; Es/N0 predicted {out.esn0_predicted_db:.1f} dB")
+    if out.blocks is not None:
+        print(f"64-byte blocks bad: {out.blocks.n_bad} of {out.blocks.n_blocks}")
+    return 0 if out.crc_ok else 1
+
+
 def build_window_classes():
     """Qt classes are created lazily so `--headless` and the physics tests never need a display or PySide6."""
     from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
@@ -98,6 +149,7 @@ def build_window_classes():
     from ui.events_dialog import EventsDialog
     from ui.globe_view import GlobeView
     from ui.map_view import MapView
+    from ui.payload_panel import PayloadPanel
     from ui.placement_dialog import PlacementDialog
     from ui.telemetry_panel import TelemetryPanel
     from ui.timeline_view import TimelineView
@@ -133,6 +185,7 @@ def build_window_classes():
             self.globe, self.map, self.timeline = GlobeView(), MapView(), TimelineView()
             self.telemetry = TelemetryPanel()
             self.conditions = ConditionsPanel(self.cfg)
+            self.payload = PayloadPanel()
 
             top = QSplitter(Qt.Orientation.Horizontal)
             top.addWidget(self._titled("3D VIEW  ·  inertial", self.globe))
@@ -153,6 +206,9 @@ def build_window_classes():
             self.setCentralWidget(vs)
 
             self.tele_dock = self._dock("TELEMETRY  ·  link budget", self.telemetry, Qt.DockWidgetArea.RightDockWidgetArea, 470)
+            self.payload_dock = self._dock("OPTICAL PAYLOAD TRANSMITTER  ·  fire real data", self.payload, Qt.DockWidgetArea.RightDockWidgetArea, 520)
+            self.tabifyDockWidget(self.tele_dock, self.payload_dock)
+            self.tele_dock.raise_()
             self.cond_dock = self._dock("CONDITIONS  ·  tinker here", self.conditions, Qt.DockWidgetArea.LeftDockWidgetArea, 400)
 
             self._build_menus()
@@ -262,6 +318,7 @@ def build_window_classes():
             m = self.menuBar().addMenu("&View")
             m.addAction(self.cond_dock.toggleViewAction())
             m.addAction(self.tele_dock.toggleViewAction())
+            m.addAction(self.payload_dock.toggleViewAction())
             m = self.menuBar().addMenu("&Playback")
             for text, key, fn in (("Play / Pause", "Space", self.clock.toggle), ("Step forward", "Right", lambda: self.clock.step(1)),
                                   ("Step back", "Left", lambda: self.clock.step(-1)), ("Next pass", "N", self.next_pass)):
@@ -335,6 +392,7 @@ def build_window_classes():
             self.map.set_result(result)
             self.timeline.set_result(result)
             self.telemetry.set_result(result)
+            self.payload.set_result(result)
             self.clock.configure(result.t_s[-1], result.config.step_s)
             t0 = self._keep_time if self._keep_time is not None else self._first_pass_time()
             self._keep_time = None
@@ -431,6 +489,7 @@ def build_window_classes():
             self.map.set_index(i)
             self.timeline.set_time(t)
             self.telemetry.set_index(i)
+            self.payload.set_time(t)
             self.time_label.setText(f"{self.result.utc(t):%Y-%m-%d %H:%M:%S} UTC    T+ {t / 3600:6.3f} h")
 
         def _on_state(self, playing: bool) -> None:
@@ -451,8 +510,19 @@ def run_gui(args) -> int:
         win.start_simulation(win.cfg, synchronous=True)
         if args.at_hours is not None:
             win.clock.seek(args.at_hours * 3600.0)
+        if args.send_test_payload:
+            from dsp import payload as pl
+            data = pl.generate_test_payload()
+            win.payload._set_file(data, "test_payload_63kb.txt (generated)")
+            out = win.payload.trx.send(data, win.result.index_at(win.clock.t), args.mod, args.dsp_rate, closed_loop=not args.no_fsm, seed=1)
+            win.show()
+            win.payload.show_transmission(out)
+            win.payload_dock.raise_()
         win.show()
         app.processEvents()
+        if args.send_test_payload:
+            win.payload.reveal_results()
+            app.processEvents()
         if not win.grab().save(args.screenshot):
             print(f"Could not write {args.screenshot} (does the folder exist?)", file=sys.stderr)
             return 1
@@ -490,13 +560,20 @@ def run_selftest(args) -> int:
         win.clock.seek(float(np.mean(res.direct_windows[res.target][0])))
         win.show()
         app.processEvents()
-        for name, widget in (("globe", win.globe), ("map", win.map), ("timeline", win.timeline), ("telemetry", win.telemetry), ("conditions", win.conditions)):
+        for name, widget in (("globe", win.globe), ("map", win.map), ("timeline", win.timeline), ("telemetry", win.telemetry), ("conditions", win.conditions), ("payload dock", win.payload)):
             img = widget.grab().toImage()
             arr = np.frombuffer(img.constBits(), dtype=np.uint8).reshape(img.height(), img.bytesPerLine())[:, : img.width() * 4]
             colours = len(np.unique(arr.reshape(-1, 4), axis=0))
             lines.append(f"{name}: {colours} distinct colours")
             ok = ok and colours > 40
         ok = ok and len(geo.land_rings()) > 100
+        from optical_dsp_bridge import OrbitalOpticalTransceiver
+        from dsp import payload as pl
+        trx = OrbitalOpticalTransceiver(res)
+        i3 = int(np.argmax(res.route.kind == 3)) if (res.route.kind == 3).any() else res.index_at(win.clock.t)
+        probe = trx.send(b"selftest payload through the optical DSP chain " * 4, i3, "Auto-Adaptive", 10.0, seed=1)
+        lines.append(f"optical DSP: {probe.route_label} as {probe.modulation}: CRC {'OK' if probe.crc_ok else 'FAIL'}, bundled generator makes {len(pl.generate_test_payload()):,} bytes")
+        ok = ok and probe.crc_ok and len(pl.generate_test_payload()) == 64512
         lines.append(f"direct passes: {len(res.direct_windows[res.target])}, handovers: {len(res.route.handovers)}, uptime: {res.route.uptime_pct:.2f} %, events: {len(res.events)}, "
                      f"route now: {res.route.label(res.index_at(win.clock.t))}")
     except Exception as exc:
@@ -516,6 +593,8 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     if args.selftest:
         return run_selftest(args)
+    if args.send_text is not None or args.send_file or (args.send_test_payload and not args.screenshot):
+        return run_transmit(args)
     return run_headless(args) if args.headless else run_gui(args)
 
 

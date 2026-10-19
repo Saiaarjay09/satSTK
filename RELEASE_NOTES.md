@@ -1,16 +1,15 @@
-# v2.0.0: Continuous 24/7 GEO Optical Relay Architecture
+# v2.1.0: Integrated End-to-End Optical DSP & Payload Transmission
 
-satSTK 2.0 adds a **geostationary optical relay network** so the laser link from the ground station to the 600 km LEO datacentre node (**Orbital-Node-Alpha**) no longer drops when the satellite sinks below the horizon.
-From the default **South India ground station (13.0° N, 77.5° E)** the direct beam alone carries usable data for only **1.25 % of the day** (three passes, about 18 minutes). With the relay network the link is up
-**100.000 % of the day in clear sky**.
+satSTK 2.1 lets you **fire a real file or message through the live orbital simulation, symbol by symbol**. The three physical-layer modules of the Orbital-Datacentre optical link simulator (IQ Mach-Zehnder transmitter, vacuum laser channel, PAT + demodulating receiver) are now part of satSTK (`dsp/`), and a new bridge feeds them the simulation's real orbital state.
 
 ### What is new
 
-- **Three GEO relay satellites** (0° inclination, 35,786 km, one orbit per sidereal day, 23 h 56 min 04 s): `GEO-Relay-IND` at 77.5° E (74.7° elevation from the station, always visible), `GEO-Relay-ATL` at 45° W, `GEO-Relay-PAC` at 165° W. Together they see every point of the 600 km shell.
-- **Dynamic routing every time step, with make-before-break handovers:** (1) direct LEO beam while the satellite is above the 10° mask (≈ 2–7 ms), (2) ground → GEO-IND → satellite (≈ 240–270 ms), (3) ground → GEO-IND → GEO-ATL/PAC → satellite (≈ 480–510 ms). 38 handovers per day, all hitless in clear sky.
-- **Relay link budget:** 300 mm telescopes, 10 W EDFAs and 10 µrad beams on the relay hops (35,000–44,000 km, about 289 dB free-space loss), cascaded bent-pipe SNR, atmosphere on the ground hop.
-- **GUI:** the 35,786 km GEO ring on the 3D globe with a **true / compressed scale** switch; the active path in **neon green (direct)** or **bright cyan (via GEO)**; a live **Active Route** indicator (`GS-INDIA -> GEO-IND -> NODE-ALPHA`), end-to-end latency, **contact uptime %**, **cumulative data (TB)** and handover counts; a **GEO relay ON / OFF** switch to compare against the direct-only link.
-- The default ground station is now GS-INDIA with a 10° minimum elevation. Everything from 0.3 is still there: placing the beam origin on a map, the Conditions panel, weather and turbulence, and 16 kinds of random and rare events.
+- **Optical Payload Transmitter dock** (a tab beside the Telemetry dock): type text, load a file, or press **Generate 63 KB Test Payload** (1,008 self-checking 64-byte lines); choose BPSK / QPSK / 8PSK / 16QAM or **Auto-Adaptive**, laser power, beacon power, symbol rate, **FSM closed-loop ON/OFF**; press **Fire Laser Payload**.
+- **Pick any moment and any route:** direct LEO, 2-hop via GEO-IND, or 3-hop via GEO-IND and GEO-ATL/PAC. Each hop uses the simulation's real range, aperture, power, beam width, pointing jitter and (on the ground hop) the atmosphere and events at that time; the GEO relays receive, add noise, and re-amplify with their EDFAs.
+- **End-to-end diagnostics:** IQ constellation, Fast Steering Mirror quadrant-detector trajectory (spiral search then PI tracking onto the centre), side-by-side payload diff (wrong bytes in red), CRC-32 pass/fail badge, exact BER, bytes wrong, 64-byte blocks bad, frame loss %, end-to-end latency, PAT time to lock.
+- **Auto-Adaptive modulation:** predicts the route's end-to-end Es/N0 and picks the densest scheme that should still pass the CRC; steps down from 16QAM to 8PSK/QPSK/BPSK as the route gets longer or the symbols faster.
+- **Continuous file stream:** slices a file into frames and sends them while the satellite moves, over the route in force at each moment. Example: the 63 KB payload streamed across a GEO → direct → GEO handover delivers 63 of 63 frames and a matching whole-file CRC, with every handover make-before-break.
+- Command line: `--send-text`, `--send-file`, `--send-test-payload`, `--stream`, `--route`, `--mod`, `--dsp-rate`, `--no-fsm`. Everything is NumPy/SciPy only.
 
 ### Download the file for your computer (below, under Assets)
 
@@ -30,7 +29,6 @@ The apps are **not code-signed**, so your computer will warn you:
 
 ### Please note (honest limits)
 
-- **100 % means 100 % of the time in clear sky with no events.** Every path starts in the air above the ground station, so heavy cloud or fog there still takes the link down; events and satellite faults hit every path too.
-- At the default 250 Gbaud the relay paths run at a raw BER of about 1–2×10⁻³ and rely on the 7 % FEC (modelled as a threshold, not a decoder). At 50 Gbaud, BPSK has a raw BER below 10⁻⁹ on every path.
-- The GEO model is idealised (perfectly station-kept relays, simple point-to-point budgets, `Σ 1/SNR` noise accumulation, no acquisition delay or packet re-ordering). Relay terminal beam width and jitter are my assumptions. **Not validated against Ansys STK or real hardware.**
-- The macOS app is built and tested on an Apple-silicon Mac; the Windows installer is built and smoke-tested by GitHub's automated build but has not been run on a real PC by the author.
+- The DSP default is **10 Gbaud**, not the simulation's 250 Gbaud: the DSP has **no forward error correction**, and its real receiver performs about 3 dB worse than textbook theory, so at 250 Gbaud a 63 KB frame cannot pass the CRC over the GEO paths (the tests check this).
+- Doppler is assumed removed by the receiver; relays are idealised amplifiers and assumed locked (only the satellite terminal runs PAT); scintillation is one random fade per frame. Not validated against Ansys STK or real hardware.
+- The macOS app is built and tested on an Apple-silicon Mac; the Windows installer is built and smoke-tested by GitHub's automated build but has not been run on a real PC by the author. A 63 KB BPSK payload peaks at about 1 GB of memory.
