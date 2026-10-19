@@ -1,40 +1,134 @@
 # Setu: STK automation for the orbital laser crosslink
 
-*Setu* is Sanskrit for "bridge": the laser link between two orbiting compute nodes. Part of the Orbital AI Datacentre project (see the Orbital-Datacentre repository for the optical-channel simulator).
+*Setu* is Sanskrit for "bridge": here, the laser bridge between two orbiting compute nodes. It is part of the Orbital AI Datacentre
+project (the [Orbital-Datacentre](https://github.com/Saiaarjay09/Orbital-Datacentre) repository holds the optical-channel simulator).
 
-`setu_stk.py` drives **Ansys STK** from Python. It builds a 24-hour scenario with two 600 km Sun-synchronous
+`setu_stk.py` drives **Ansys STK** (Systems Tool Kit) from Python. It builds a 24-hour scenario with two 600 km Sun-synchronous
 satellites (**Orbital-Node-Alpha**, **Orbital-Node-Beta**), reports **when Alpha is in sunlight, penumbra and umbra** (the cases the
 mechanically pumped fluid loop must survive), fits Alpha with a **1550 nm laser transmitter** and Beta with a **laser receiver**
-(100 microradian beam), computes the **line-of-sight access** between them and extracts **received power, BER and latency**
+(100 microradian beam), computes the **line-of-sight access** between them, and extracts **received power, BER and latency**
 during each window.
 
 > **Status, honestly.** The script was written from Ansys' public STK documentation and has **not been run against a live STK**
-> (STK was not available where it was written). The orbit mathematics and the plumbing are unit-tested
-> (`python -m pytest tests/test_setu_stk.py`), and `--offline-preview` gives an independent analytic answer to compare with. Expect to
-> fix a name or two on the first real run; the script prints what STK rejected and saves every attribute STK exposes in
-> `stk_output/transmitter_attributes.txt` and `receiver_attributes.txt`, so any difference is quick to correct.
+> (STK was not available where it was written). The orbit mathematics and the STK plumbing are unit-tested (`python -m pytest`),
+> and `--offline-preview` gives an independent analytic answer to compare with. Expect to fix a name or two on the first real run: the
+> script prints what STK rejected and saves every attribute STK exposes, so any difference is quick to correct.
 
-## What you need
+## Download
+
+Go to the **Releases** page and take the zip for your computer:
+
+| Download | For |
+|---|---|
+| `Setu-STK-<version>-windows.zip` | Windows with STK installed. Unzip and double-click `run_windows.bat` |
+| `Setu-STK-<version>-macos.zip` | Mac or Linux. STK's desktop app does not run on macOS, so this runs the **offline preview** (double-click `run_preview_mac.command`) |
+
+## What is in this repository, file by file
+
+```
+STK/
+├── setu_stk.py              the program: orbit maths, the preview, and every STK call
+├── README.md                this guide
+├── requirements.txt         the Python libraries needed (numpy, pytest)
+├── RELEASE_NOTES.md         the text shown on each GitHub release page
+├── run_windows.bat          one-click launcher for Windows (full STK run)
+├── run_preview_mac.command  one-click launcher for macOS / Linux (offline preview)
+├── .gitignore               keeps results, virtual environments and caches out of git
+├── tests/
+│   └── test_setu_stk.py     the automated checks
+└── .github/workflows/
+    └── release.yml          the automatic release builder
+```
+
+### `setu_stk.py` (the program)
+
+One file, in four layers. The settings are the upper-case numbers in the block at the top; nothing else needs editing to change the design.
+
+1. **Settings block** (top of the file). Scenario name, start date and length (24 h), report time step, altitude (600 km), eccentricity, the
+   local solar time of each satellite's ascending node (`NODE_ALPHA_LTAN_H`, `NODE_BETA_LTAN_H`), where each starts along its orbit, and the laser
+   settings (wavelength 1550 nm, power, data rate, beam divergence 100 microradians, apertures, the Earth-clearance margin).
+2. **Orbit maths** (no STK needed; also used by the preview).
+   * `sso_inclination_deg` works out the inclination at which the Earth's bulge (J2) turns the orbit plane once a year, matching the Sun
+     (about 97.79 degrees at 600 km). That drift is what "Sun-synchronous" means.
+   * `sun_ecliptic_longitude_deg`, `sun_right_ascension_deg` and `raan_for_ltan_deg` place the orbit plane so the node crosses the equator
+     at the chosen local solar time (accurate to about a degree).
+   * `orbit_elements` bundles these into one orbit description. `parse_utcg` and `format_utcg` convert STK-style dates.
+3. **Offline preview** (`offline_propagate`, `offline_sun_vectors`, `intervals`, `offline_preview`, `print_preview`). A simple analytic model:
+   circular orbits, slow J2 plane drift, the Earth's shadow as a cylinder, and a straight-line test for whether the Earth blocks the view
+   between the nodes. It prints Alpha's eclipse passes and the line-of-sight windows with range. It needs only NumPy and is the way to sanity-check
+   STK's answers. STK's numbers are the ones to use.
+4. **STK automation.** Everything that touches STK is a small function with a clear error message:
+   * `start_stk` launches STK (desktop window, or Engine with no window) through the `agi.stk12` Python API, and explains how to install it if missing.
+   * `connect` runs one STK "Connect" text command and returns its reply, naming the command if STK rejects it.
+   * `build_scenario` creates the 24-hour scenario. `add_sso_satellite` creates a satellite on the J2 propagator with the computed orbit.
+   * `alpha_eclipse_times` asks STK for Alpha's **Lighting Times** report and `parse_lighting_report` turns it into umbra / penumbra / sunlight intervals.
+   * `add_laser_terminals` adds the transmitter (on Alpha) and receiver (on Beta), selects STK's laser models, and sets frequency (c / 1550 nm),
+     power, data rate and beam divergence. Because the optical-antenna attribute names differ between STK releases, `list_attributes` and
+     `set_first_matching` search the model's attribute list for "divergence", "beamwidth" or "diameter" rather than assuming a name.
+   * `dump_attributes` saves everything STK exposes for the two laser objects, to make any mismatch easy to fix.
+   * `point_at_each_other` turns on target pointing so each satellite aims at the other (a stand-in for the fast steering mirror, assuming perfect pointing).
+   * `access_windows` lists the line-of-sight windows. `link_budget_samples` reads STK's *Link Information* data (range, received isotropic power,
+     Eb/No, BER, link margin, propagation delay) across each window, and `summarise_link` reduces it to min / mean / max, ignoring STK's "-9999.99
+     means no link" flag.
+   * `write_csv` saves results; `run_stk` runs the whole sequence; `main` reads the command-line options.
+
+Command-line options: `--offline-preview` (no STK), `--engine` (STK Engine, no window), `--keep-open` (leave STK open afterwards).
+
+### `README.md`
+This file.
+
+### `requirements.txt`
+`numpy` (orbit maths and the preview) and `pytest` (the tests). The STK Python API is **not** on this list: it is not on PyPI for STK 12 and
+comes as a file inside your STK installation (see below).
+
+### `run_windows.bat`
+Double-click launcher for Windows. The first time it creates a private Python environment (`.venv`), installs `requirements.txt`, checks for
+the STK Python API (asking for the path of the `.whl` file if it is missing, or offering the offline preview instead), then runs `setu_stk.py`.
+Any options you type after it are passed on, e.g. `run_windows.bat --engine`.
+
+### `run_preview_mac.command`
+Double-click launcher for macOS / Linux. It makes the same private environment and runs `setu_stk.py --offline-preview`. (STK's desktop app is
+Windows-only, so a Mac can run the preview but not STK.) If macOS refuses to open it the first time, right-click it and choose **Open**.
+
+### `tests/test_setu_stk.py`
+Twelve automated checks, run with `python -m pytest`. They cover: the Sun-synchronous inclination against textbook values (97.79 degrees at
+600 km); the Sun's position and the local-time-to-RAAN conversion; date formatting; that the preview orbit is circular with the right period;
+that eclipse lasts about 35 minutes per orbit and the line of sight is genuinely intermittent; that the Earth blocks a link through its centre; the
+parsing of STK's Lighting Times report; error handling around Connect commands; the attribute search (using a stand-in for STK, so no STK is needed);
+the link summary and its handling of the "no link" flag; the 1550 nm frequency; and the message shown when the STK Python API is missing.
+
+### `RELEASE_NOTES.md`
+The text GitHub shows on each release page (what each download is for, and the honest status).
+
+### `.gitignore`
+Keeps `stk_output/` (your results), the virtual environments and Python caches out of git.
+
+### `.github/workflows/release.yml`
+GitHub's automatic builder. When a version tag such as `v0.1.0` is pushed it runs the tests and the preview, builds the two zips (Windows with
+`run_windows.bat`; macOS with `run_preview_mac.command`), and publishes them as a GitHub Release using `RELEASE_NOTES.md`. To make a release:
+`git tag v0.1.0 && git push origin v0.1.0`.
+
+## What you need to run the full STK simulation
 
 | Need | Notes |
 |---|---|
-| **Windows 10/11** with **Ansys STK 12.x** installed and licensed | STK's desktop application is Windows-only (Linux has STK Engine only; macOS is not supported) |
+| **Windows 10/11** with **Ansys STK 12.x**, licensed | STK's desktop application is Windows-only (Linux has STK Engine only; macOS is not supported) |
 | The **Communications** capability in your STK licence | needed for transmitters, receivers and link budgets |
 | **Python 3.9 to 3.12** (match your STK release notes) | from python.org |
 | The STK Python API, `agi.stk12` | a `.whl` file that ships **inside the STK install folder** (search for `agi.stk12*.whl`, commonly under `...\STK 12\bin\AgPythonAPI\`) |
-| `numpy` | for the offline preview and the orbit maths |
+| `numpy` | for the orbit maths and the preview (installed by the launcher) |
 
-## Install and run (Windows, PowerShell)
+Manual install, if you prefer (PowerShell):
 
 ```powershell
-python -m venv stkenv
-stkenv\Scripts\activate
-pip install numpy comtypes
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
 pip install "C:\Program Files\AGI\STK 12\bin\AgPythonAPI\agi.stk12-<version>-py3-none-any.whl"   # use the real file name on your PC
 python setu_stk.py
 ```
 
-STK opens, builds the scenario while you watch, and prints the results. Files go to `stk_output\`:
+Results are written to `stk_output\`:
 
 | File | Contents |
 |---|---|
@@ -44,18 +138,9 @@ STK opens, builds the scenario while you watch, and prints the results. Files go
 | `transmitter_attributes.txt`, `receiver_attributes.txt` | every setting STK exposes for the two laser objects |
 | `Orbital_AI_Datacentre.sc` | the scenario, which you can open in STK |
 
-Other ways to run it:
-
-```powershell
-python setu_stk.py --offline-preview   # no STK: analytic eclipse + line-of-sight estimate (works on any computer with numpy)
-python setu_stk.py --engine            # STK Engine, no window (also works on Linux)
-python setu_stk.py --keep-open         # leave STK open to explore the scenario
-```
-
-`--offline-preview` is worth running first, even on a Mac: it prints the Sun-synchronous inclination (97.79 degrees at 600 km), Alpha's
-eclipse passes (about 35 minutes of shadow every 96.7-minute orbit at this altitude) and the line-of-sight windows (about 18 minutes at a
-time, 4,300 to 5,200 km range, with the default offsets). It is a simple circular-orbit and cylindrical-shadow model: **STK's numbers are the
-ones to use**, and agreement within a few minutes is the sanity check.
+Run the offline preview first, even on a Mac: `python setu_stk.py --offline-preview` prints the Sun-synchronous inclination, Alpha's eclipse
+passes (about 35 minutes of shadow every 96.7-minute orbit at this altitude) and the line-of-sight windows (about 18 minutes at a time, 4,300 to
+5,200 km range with the default offsets). Agreement with STK within a few minutes is the sanity check.
 
 ## Changing the design
 
