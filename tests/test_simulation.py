@@ -6,19 +6,21 @@ import pytest
 
 import orbital_engine as oe
 import simulation as sim
+from helpers import direct_cfg
 
 
 @pytest.fixture(scope="module")
 def result():
-    return sim.run_simulation(sim.SimulationConfig(satellites=sim.two_satellites(), step_s=10.0))
+    return sim.run_simulation(direct_cfg(satellites=sim.two_satellites(), step_s=10.0))
 
 
-def test_default_scenario_is_one_satellite_and_one_ground_station():
+def test_default_scenario_is_the_south_india_station_one_satellite_and_three_geo_relays():
     cfg = sim.SimulationConfig()
     assert [s.name for s in cfg.satellites] == ["Orbital-Node-Alpha"]
-    assert cfg.ground.min_elevation_deg == 20.0
+    assert (cfg.ground.name, cfg.ground.lat_deg, cfg.ground.lon_deg, cfg.ground.min_elevation_deg) == ("GS-INDIA", 13.0, 77.5, 10.0)
+    assert cfg.relay.enabled and [r.short for r in cfg.relay.relays] == ["GEO-IND", "GEO-ATL", "GEO-PAC"]
     r = sim.run_simulation(cfg)
-    assert len(r.tracks) == 1 and r.n == 8641 and list(r.ground_links) == [0] and r.crosslinks == {}
+    assert len(r.tracks) == 1 and r.n == 8641 and list(r.ground_links) == [0] and r.crosslinks == {} and len(r.relay_tracks) == 3
 
 
 def test_two_satellite_scenario_shape(result):
@@ -70,8 +72,8 @@ def test_beam_state_colours(result):
 
 
 def test_one_second_and_ten_second_results_agree():
-    fine = sim.run_simulation(sim.SimulationConfig(step_s=1.0, duration_h=24))
-    coarse = sim.run_simulation(sim.SimulationConfig(step_s=10.0, duration_h=24))
+    fine = sim.run_simulation(direct_cfg(step_s=1.0, duration_h=24))
+    coarse = sim.run_simulation(direct_cfg(step_s=10.0, duration_h=24))
     wf, wc = fine.primary_windows, coarse.primary_windows
     assert wf.shape == wc.shape
     assert wf == pytest.approx(wc, abs=12.0)                           # pass edges within one 10 s step
@@ -92,19 +94,19 @@ def test_eclipses_repeat_every_orbit(result):
 
 def test_a_station_at_the_pole_sees_the_sun_synchronous_satellite_every_orbit():
     """An orbit inclined 97.79 degrees reaches 82.2 degrees latitude, so a station at 82 N sees nearly every revolution."""
-    r = sim.run_simulation(sim.SimulationConfig(ground=oe.GroundStation("Pole", 80.0, 0.0, 0.0, 10.0), duration_h=24))
+    r = sim.run_simulation(direct_cfg(ground=oe.GroundStation("Pole", 80.0, 0.0, 0.0, 10.0), duration_h=24))
     assert len(r.primary_windows) >= 12
 
 
 def test_moving_the_station_moves_the_passes():
-    a = sim.run_simulation(sim.SimulationConfig(ground=oe.GroundStation("A", 28.3, -16.5, 0.0, 20.0)))
-    b = sim.run_simulation(sim.SimulationConfig(ground=oe.GroundStation("B", 28.3, 100.0, 0.0, 20.0)))
+    a = sim.run_simulation(direct_cfg(ground=oe.GroundStation("A", 28.3, -16.5, 0.0, 20.0)))
+    b = sim.run_simulation(direct_cfg(ground=oe.GroundStation("B", 28.3, 100.0, 0.0, 20.0)))
     assert not np.allclose(a.primary_windows[:1], b.primary_windows[:1])
 
 
 def test_higher_minimum_elevation_means_fewer_and_shorter_passes():
-    lo = sim.run_simulation(sim.SimulationConfig(ground=oe.GroundStation("S", 28.3, -16.5, 0.0, 10.0)))
-    hi = sim.run_simulation(sim.SimulationConfig(ground=oe.GroundStation("S", 28.3, -16.5, 0.0, 50.0)))
+    lo = sim.run_simulation(direct_cfg(ground=oe.GroundStation("S", 28.3, -16.5, 0.0, 10.0)))
+    hi = sim.run_simulation(direct_cfg(ground=oe.GroundStation("S", 28.3, -16.5, 0.0, 50.0)))
     assert np.sum(lo.primary_link.locked) > np.sum(hi.primary_link.locked)
 
 
@@ -116,7 +118,7 @@ def test_energy_stays_bounded_with_j2(result):
 
 def test_config_round_trips_through_json_including_events():
     from events import EventsConfig, ManualEvent
-    cfg = sim.SimulationConfig(step_s=1.0, duration_h=12, satellites=sim.two_satellites(), target_index=1,
+    cfg = direct_cfg(step_s=1.0, duration_h=12, satellites=sim.two_satellites(), target_index=1,
                                events=EventsConfig(enabled=True, seed=9, rate_scale=4.0, disabled_types=["bird"], manual=[ManualEvent("ash", 3600.0, 7200.0, 0.8)]))
     cfg.ground = oe.GroundStation("Somewhere", -33.9, 18.4, 25.0, 30.0)
     cfg.atmosphere.rain_mm_h = 12.0
@@ -128,20 +130,20 @@ def test_config_round_trips_through_json_including_events():
 
 
 def test_second_satellite_can_be_the_target():
-    r = sim.run_simulation(sim.SimulationConfig(satellites=sim.two_satellites(), target_index=1, duration_h=6))
+    r = sim.run_simulation(direct_cfg(satellites=sim.two_satellites(), target_index=1, duration_h=6))
     assert r.primary_link is r.ground_links[1] and r.target == 1
 
 
 def test_three_satellites_give_three_crosslink_pairs():
     sats = sim.two_satellites() + [oe.SatelliteConfig("Orbital-Node-Gamma", ltan_hours=12.0, true_anomaly_deg=90.0)]
-    r = sim.run_simulation(sim.SimulationConfig(satellites=sats, duration_h=2, step_s=10))
+    r = sim.run_simulation(direct_cfg(satellites=sats, duration_h=2, step_s=10))
     assert sorted(r.crosslinks) == [(0, 1), (0, 2), (1, 2)]
 
 
 def test_validation_rejects_bad_input():
-    for bad in (sim.SimulationConfig(satellites=[]), sim.SimulationConfig(step_s=0.0), sim.SimulationConfig(target_index=3),
-                sim.SimulationConfig(ground=oe.GroundStation("x", 95.0, 0.0, 0.0, 20.0)),
-                sim.SimulationConfig(ground=oe.GroundStation("x", 0.0, 0.0, 0.0, 95.0))):
+    for bad in (direct_cfg(satellites=[]), direct_cfg(step_s=0.0), direct_cfg(target_index=3),
+                direct_cfg(ground=oe.GroundStation("x", 95.0, 0.0, 0.0, 20.0)),
+                direct_cfg(ground=oe.GroundStation("x", 0.0, 0.0, 0.0, 95.0))):
         with pytest.raises(ValueError):
             bad.validate()
 

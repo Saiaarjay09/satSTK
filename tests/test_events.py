@@ -4,6 +4,7 @@ import pytest
 
 import events as ev
 import simulation as sim
+from helpers import direct_cfg
 
 DAY = 86400.0
 
@@ -96,9 +97,9 @@ def _first_pass_mid(result):
 
 
 def test_a_manual_outage_during_a_pass_blocks_the_beam_and_removes_throughput():
-    base = sim.run_simulation(sim.SimulationConfig())
+    base = sim.run_simulation(direct_cfg())
     mid = _first_pass_mid(base)
-    cfg = sim.SimulationConfig(events=ev.EventsConfig(manual=[ev.ManualEvent("flock", mid - 30.0, 60.0, 0.5)]))
+    cfg = direct_cfg(events=ev.EventsConfig(manual=[ev.ManualEvent("flock", mid - 30.0, 60.0, 0.5)]))
     r = sim.run_simulation(cfg)
     i = r.index_at(mid)
     assert base.primary_link.locked[i] and not r.primary_link.locked[i]
@@ -108,34 +109,34 @@ def test_a_manual_outage_during_a_pass_blocks_the_beam_and_removes_throughput():
 
 
 def test_a_brief_bird_only_trims_throughput_instead_of_deleting_the_step():
-    base = sim.run_simulation(sim.SimulationConfig())
+    base = sim.run_simulation(direct_cfg())
     mid = _first_pass_mid(base)
-    r = sim.run_simulation(sim.SimulationConfig(events=ev.EventsConfig(manual=[ev.ManualEvent("bird", mid - 1.0, 2.0, 0.5)])))
+    r = sim.run_simulation(direct_cfg(events=ev.EventsConfig(manual=[ev.ManualEvent("bird", mid - 1.0, 2.0, 0.5)])))
     i = r.index_at(mid)
     assert r.primary_link.locked[i]
     assert r.primary_link.adaptive_throughput_gbps[i] == pytest.approx(0.8 * base.primary_link.adaptive_throughput_gbps[i], rel=1e-6)   # 2 s of a 10 s step lost
 
 
 def test_a_loss_event_reduces_power_by_exactly_its_decibels():
-    base = sim.run_simulation(sim.SimulationConfig())
+    base = sim.run_simulation(direct_cfg())
     mid = _first_pass_mid(base)
     ev_cfg = ev.EventsConfig(manual=[ev.ManualEvent("cirrus", mid - 600.0, 1200.0, 1.0)])      # severity 1 = 4 dB
-    r = sim.run_simulation(sim.SimulationConfig(events=ev_cfg))
+    r = sim.run_simulation(direct_cfg(events=ev_cfg))
     i = r.index_at(mid)
     assert base.primary_link.rx_power_dbm[i] - r.primary_link.rx_power_dbm[i] == pytest.approx(4.0, abs=1e-6)
 
 
 def test_earthquake_degrades_pointing_and_blocks():
-    base = sim.run_simulation(sim.SimulationConfig())
+    base = sim.run_simulation(direct_cfg())
     mid = _first_pass_mid(base)
-    r = sim.run_simulation(sim.SimulationConfig(events=ev.EventsConfig(manual=[ev.ManualEvent("earthquake", mid - 100.0, 200.0, 1.0)])))
+    r = sim.run_simulation(direct_cfg(events=ev.EventsConfig(manual=[ev.ManualEvent("earthquake", mid - 100.0, 200.0, 1.0)])))
     i = r.index_at(mid)
     assert r.primary_link.pointing_loss_db[i] > base.primary_link.pointing_loss_db[i] + 3.0
     assert r.beam_state(i)[0] == "blocked"
 
 
 def test_events_far_from_any_pass_change_nothing_about_the_link():
-    base = sim.run_simulation(sim.SimulationConfig())
+    base = sim.run_simulation(direct_cfg())
     gap_t = base.t_s[np.flatnonzero(~base.primary_link.visible)[10]]
-    r = sim.run_simulation(sim.SimulationConfig(events=ev.EventsConfig(manual=[ev.ManualEvent("storm", gap_t, 10.0, 1.0)])))
+    r = sim.run_simulation(direct_cfg(events=ev.EventsConfig(manual=[ev.ManualEvent("storm", gap_t, 10.0, 1.0)])))
     assert np.array_equal(r.primary_link.locked, base.primary_link.locked)

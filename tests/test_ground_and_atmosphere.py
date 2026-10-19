@@ -8,6 +8,7 @@ import atmosphere as at
 import laser_link_engine as ll
 import orbital_engine as oe
 import simulation as sim
+from helpers import direct_cfg
 
 
 # ---- geometry ---------------------------------------------------------------------------------------------------------
@@ -46,7 +47,7 @@ def test_slant_range_at_the_horizon_matches_pythagoras():
 
 
 def test_topocentric_rates_match_finite_differences():
-    r = sim.run_simulation(sim.SimulationConfig(duration_h=24, step_s=1.0))
+    r = sim.run_simulation(direct_cfg(duration_h=24, step_s=1.0))
     k = int(np.argmax(r.primary_link.locked))
     sl = slice(k + 20, k + 200)
     t = r.topo[0]
@@ -64,7 +65,7 @@ def test_sun_elevation_at_noon_on_the_equator_in_equinox():
 
 
 def test_doppler_for_a_ground_pass_is_largest_at_the_horizon_and_zero_at_closest_approach():
-    r = sim.run_simulation(sim.SimulationConfig(duration_h=24, step_s=1.0))
+    r = sim.run_simulation(direct_cfg(duration_h=24, step_s=1.0))
     link = r.primary_link
     w = r.primary_windows[int(np.argmax([e - s for s, e in r.primary_windows]))]
     idx = np.flatnonzero((r.t_s >= w[0]) & (r.t_s <= w[1]))
@@ -143,7 +144,7 @@ def test_lognormal_fade_matches_monte_carlo():
 
 # ---- ground link budget -----------------------------------------------------------------------------------------------
 def _link(atmosphere=None, **kw):
-    cfg = sim.SimulationConfig(duration_h=24, **kw)
+    cfg = direct_cfg(duration_h=24, **kw)
     if atmosphere:
         cfg.atmosphere = atmosphere
     return sim.run_simulation(cfg)
@@ -184,10 +185,10 @@ def test_clouds_cut_the_received_power_and_can_kill_the_link():
 
 def test_higher_divergence_costs_power_and_bigger_aperture_gains_it():
     base = _link().primary_link
-    wide = sim.run_simulation(sim.SimulationConfig(link=ll.LaserLinkConfig(divergence_urad=200.0))).primary_link
+    wide = sim.run_simulation(direct_cfg(link=ll.LaserLinkConfig(divergence_urad=200.0))).primary_link
     k = int(np.argmax(base.locked))
     assert base.rx_power_dbm[k] - wide.rx_power_dbm[k] == pytest.approx(6.0, abs=0.7)
-    big = sim.run_simulation(sim.SimulationConfig(link=ll.LaserLinkConfig(rx_aperture_m=0.6))).primary_link
+    big = sim.run_simulation(direct_cfg(link=ll.LaserLinkConfig(rx_aperture_m=0.6))).primary_link
     assert big.rx_power_dbm[k] - base.rx_power_dbm[k] == pytest.approx(6.0, abs=0.7)
 
 

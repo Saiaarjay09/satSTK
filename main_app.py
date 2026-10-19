@@ -16,7 +16,7 @@ import argparse
 import sys
 from datetime import datetime, timezone
 
-__version__ = "0.3.0"
+__version__ = "2.0.0"
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -37,6 +37,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--events", action="store_true", help="switch random events on")
     g.add_argument("--event-seed", type=int, default=1, help="random seed for events (same seed = same events)")
     g.add_argument("--event-rate", type=float, default=1.0, help="event frequency multiplier (1 = typical, 100 = everything goes wrong)")
+    g.add_argument("--no-geo-relay", action="store_true", help="switch the GEO optical relay network OFF (direct ground-to-satellite passes only)")
     g.add_argument("--two-satellites", action="store_true", help="add the second satellite, Orbital-Node-Beta")
     g.add_argument("--hours", type=float, default=24.0, help="scenario length in hours (default 24)")
     g.add_argument("--step", type=float, default=10.0, help="time step in seconds: 1 or 10 (default 10)")
@@ -63,6 +64,7 @@ def config_from_args(args):
     if args.min_elevation is not None:
         gs.min_elevation_deg = args.min_elevation
     cfg.ground = gs
+    cfg.relay.enabled = not args.no_geo_relay
     if args.weather:
         match = {k.lower(): v for k, v in WEATHER_PRESETS.items()}.get(args.weather.lower())
         if match is None:
@@ -210,6 +212,11 @@ def build_window_classes():
             self.btn_play.setMinimumWidth(90)
             self.btn_step = QPushButton("Step ▶")
             self.btn_pass = QPushButton("Next pass ⏭")
+            self.geo_btn = QPushButton("GEO relay: ON")
+            self.geo_btn.setCheckable(True)
+            self.geo_btn.setChecked(self.cfg.relay.enabled)
+            self.geo_btn.setToolTip("Switch the geostationary optical relay network on or off and compare the contact uptime")
+            self.geo_btn.toggled.connect(self._geo_button_toggled)
             self.speed = QComboBox()
             for label, value in SPEEDS:
                 self.speed.addItem(label, value)
@@ -228,6 +235,8 @@ def build_window_classes():
             self.clock.set_speed(self.speed.currentData())
             for w in (self.btn_reset, self.btn_back, self.btn_play, self.btn_step, self.btn_pass):
                 lay.addWidget(w)
+            lay.addSpacing(12)
+            lay.addWidget(self.geo_btn)
             lay.addSpacing(12)
             lay.addWidget(QLabel("Speed"))
             lay.addWidget(self.speed)
@@ -333,15 +342,29 @@ def build_window_classes():
             self._on_time(self.clock.t)
             gs = result.config.ground
             n_pass = len(result.primary_windows)
-            self.statusBar().showMessage(f"Beam origin: {gs.name} ({gs.lat_deg:+.2f}°, {gs.lon_deg:+.2f}°).  {n_pass} usable pass(es) in {result.config.duration_h:g} h, "
-                                         f"{len(result.events)} event(s).  Space = play/pause, N = next pass, ←/→ = step.")
+            rt = result.route
+            self.statusBar().showMessage(f"Beam origin: {gs.name} ({gs.lat_deg:+.2f}°, {gs.lon_deg:+.2f}°).  GEO relay {'ON' if result.network_link is not None else 'OFF'}: "
+                                         f"usable data {rt.uptime_pct:.2f} % of {result.config.duration_h:g} h (direct alone {rt.direct_uptime_pct:.2f} %), "
+                                         f"{len(rt.handovers)} handover(s), {len(result.events)} event(s).  Space = play/pause, N = next pass, ←/→ = step.")
 
         def _first_pass_time(self) -> float:
-            w = self.result.primary_windows
+            w = self.result.direct_windows.get(self.result.target, self.result.primary_windows)
             return float(max(0.0, w[0][0] - 120.0)) if len(w) else 0.0
 
         # ---------------------------------------------------------------- user actions
+        def _geo_button_toggled(self, on: bool) -> None:
+            self.geo_btn.setText("GEO relay: ON" if on else "GEO relay: OFF")
+            if self.conditions.geo_on.isChecked() != on:
+                self.conditions.geo_on.setChecked(on)         # this triggers the (debounced) recompute
+
+        def _sync_geo_button(self, on: bool) -> None:
+            self.geo_btn.blockSignals(True)
+            self.geo_btn.setChecked(on)
+            self.geo_btn.setText("GEO relay: ON" if on else "GEO relay: OFF")
+            self.geo_btn.blockSignals(False)
+
         def _conditions_changed(self) -> None:
+            self._sync_geo_button(self.conditions.geo_on.isChecked())
             if self.conditions.live.isChecked():
                 self._debounce.start()
 
@@ -376,9 +399,9 @@ def build_window_classes():
                 self.recompute_from_panel()
 
         def next_pass(self) -> None:
-            if self.result is None or not len(self.result.primary_windows):
+            if self.result is None or not len(self.result.direct_windows.get(self.result.target, [])):
                 return
-            w = self.result.primary_windows
+            w = self.result.direct_windows[self.result.target]
             later = [s for s, e in w if s - 60.0 > self.clock.t]
             self.clock.seek(max(0.0, (later[0] if later else w[0][0]) - 60.0))
 
@@ -463,8 +486,8 @@ def run_selftest(args) -> int:
         win.resize(1500, 850)
         win.start_simulation(win.cfg, synchronous=True)
         res = win.result
-        ok = ok and len(res.primary_windows) > 0
-        win.clock.seek(float(np.mean(res.primary_windows[0])))
+        ok = ok and len(res.direct_windows[res.target]) > 0 and res.route is not None and res.network_link is not None
+        win.clock.seek(float(np.mean(res.direct_windows[res.target][0])))
         win.show()
         app.processEvents()
         for name, widget in (("globe", win.globe), ("map", win.map), ("timeline", win.timeline), ("telemetry", win.telemetry), ("conditions", win.conditions)):
@@ -474,7 +497,8 @@ def run_selftest(args) -> int:
             lines.append(f"{name}: {colours} distinct colours")
             ok = ok and colours > 40
         ok = ok and len(geo.land_rings()) > 100
-        lines.append(f"passes: {len(res.primary_windows)}, events: {len(res.events)}, beam now: {res.beam_state(res.index_at(win.clock.t))[0]}")
+        lines.append(f"direct passes: {len(res.direct_windows[res.target])}, handovers: {len(res.route.handovers)}, uptime: {res.route.uptime_pct:.2f} %, events: {len(res.events)}, "
+                     f"route now: {res.route.label(res.index_at(win.clock.t))}")
     except Exception as exc:
         ok = False
         lines.append(f"error: {type(exc).__name__}: {exc}")

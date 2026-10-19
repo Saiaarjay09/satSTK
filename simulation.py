@@ -26,11 +26,12 @@ import numpy as np
 import atmosphere as atm
 import events as ev
 import orbital_engine as oe
-from laser_link_engine import LaserLinkConfig, LinkResult, MODULATIONS, compute_ground_link, compute_link
+from laser_link_engine import LaserLinkConfig, LinkResult, MODULATIONS, RelayConfig, RouteResult, compute_ground_link, compute_link, compute_routes
 
 DEFAULT_START = datetime(2026, 12, 21, 0, 0, 0, tzinfo=timezone.utc)   # northern winter solstice: long eclipses for a morning orbit
 
 GROUND_STATION_PRESETS = {
+    "South India Ground Station (13.0°N, 77.5°E)": oe.GroundStation("GS-INDIA", 13.0, 77.5, 900.0, 10.0),
     "Teide Observatory, Tenerife (ESA OGS)": oe.GroundStation("Teide OGS", 28.30, -16.51, 2390.0),
     "Table Mountain, California (JPL OCTL)": oe.GroundStation("Table Mountain", 34.38, -117.68, 2280.0),
     "Haleakala, Hawaii": oe.GroundStation("Haleakala", 20.71, -156.26, 3055.0),
@@ -69,6 +70,7 @@ class SimulationConfig:
     events: ev.EventsConfig = field(default_factory=ev.EventsConfig)
     thermal: oe.ThermalConfig = field(default_factory=oe.ThermalConfig)
     link: LaserLinkConfig = field(default_factory=LaserLinkConfig)
+    relay: RelayConfig = field(default_factory=RelayConfig)      # the GEO optical relay network (switch it off with relay.enabled = False)
     target_index: int = 0                      # which satellite the ground beam tracks
     shadow_model: str = "conical"              # or "cylindrical"
     los_buffer_km: float = oe.ATMOSPHERE_BUFFER_KM   # for satellite-to-satellite crosslinks
@@ -103,7 +105,9 @@ class SimulationConfig:
         sats = [oe.SatelliteConfig(**s) for s in d.pop("satellites", [asdict(s) for s in default_satellites()])]
         events_d = dict(d.pop("events", {}))
         manual = [ev.ManualEvent(**m) for m in events_d.pop("manual", [])]
-        return cls(start=oe.as_utc(start), satellites=sats, ground=oe.GroundStation(**d.pop("ground", {})),
+        relay_d = dict(d.pop("relay", {}))
+        relay = RelayConfig(relays=[oe.GeoRelayConfig(**r) for r in relay_d.pop("relays", [asdict(r) for r in oe.default_geo_relays()])], **relay_d)
+        return cls(start=oe.as_utc(start), satellites=sats, ground=oe.GroundStation(**d.pop("ground", {})), relay=relay,
                    atmosphere=atm.AtmosphereConfig(**d.pop("atmosphere", {})), events=ev.EventsConfig(manual=manual, **events_d),
                    thermal=oe.ThermalConfig(**d.pop("thermal", {})), link=LaserLinkConfig(**d.pop("link", {})), **d)
 
@@ -125,6 +129,10 @@ class SimulationResult:
     eclipse_windows: list             # per satellite: {"penumbra": (m,2), "umbra": (m,2), "sunlit": (m,2)}
     events: list                      # list of events.Event
     effects: ev.EventEffects
+    relay_tracks: list = field(default_factory=list)        # GEO relay satellites (empty when the relay network is off)
+    route: RouteResult | None = None                         # which path carries the data at every step (direct / via GEO)
+    network_link: LinkResult | None = None                   # the end-to-end link over that path (None when the relay network is off)
+    direct_windows: dict = field(default_factory=dict)       # {sat_index: (m,2)} passes of the DIRECT beam (what you would get without relays)
 
     @property
     def target(self) -> int:
@@ -132,7 +140,8 @@ class SimulationResult:
 
     @property
     def primary_link(self) -> LinkResult:
-        return self.ground_links[self.target]
+        """The end-to-end link to the target satellite: over the GEO relay network when it is on, else the direct beam."""
+        return self.network_link if self.network_link is not None else self.ground_links[self.target]
 
     @property
     def primary_windows(self) -> np.ndarray:
@@ -157,7 +166,7 @@ class SimulationResult:
         """
         link = self.primary_link
         if not link.visible[i]:
-            return "blocked", "below minimum elevation"
+            return "blocked", "below minimum elevation" if self.network_link is None else "no route to the satellite"
         if link.outage_fraction[i] >= 0.5:
             names = [e.name for e in ev.active_events(self.events, float(self.t_s[i]), self.config.step_s) if e.outage]
             return "blocked", "event: " + (", ".join(names) if names else "outage")
@@ -183,12 +192,12 @@ class SimulationResult:
                          f"{oe.orbital_period_s(a)/60:.2f} min, beta {tr.beta_deg[0]:+.1f} deg, umbra {len(ecl['umbra'])} passes "
                          f"({umbra_s/60:.1f} min total), penumbra {pen_s/60:.1f} min, sunlit {100*np.mean(tr.eclipse == 0):.1f} %")
         for k, link in self.ground_links.items():
-            w = self.access_windows[k]
+            w = self.direct_windows[k]
             dur = float(np.sum(w[:, 1] - w[:, 0]))
             above = float(np.mean(link.visible)) * cfg.duration_h * 60
-            lines.append(f"Beam to {self.tracks[k].name}{' (target)' if k == self.target else ''}: {len(w)} passes above the mask, "
-                         f"{dur/60:.1f} min with the beam on the satellite ({above:.1f} min above the horizon mask)")
-            usable = link.adaptive_throughput_gbps > 0
+            lines.append(f"Direct beam to {self.tracks[k].name}{' (target)' if k == self.target else ''}: {len(w)} passes above the mask, "
+                         f"{dur/60:.1f} min with the beam on the satellite ({above:.1f} min above the horizon mask), "
+                         f"{100 * np.mean(link.adaptive_throughput_gbps > 0):.2f} % of the scenario with usable data")
             if link.locked.any():
                 v = link.locked
                 lines.append(f"   range {np.nanmin(link.range_km[v]):.0f}-{np.nanmax(link.range_km[v]):.0f} km, peak elevation "
@@ -197,9 +206,23 @@ class SimulationResult:
                              f"{np.nanmin(link.channel['atmosphere_loss_db'][v]):.1f}-{np.nanmax(link.channel['atmosphere_loss_db'][v]):.1f} dB, "
                              f"Doppler {np.nanmin(link.doppler_ghz[v]):+.1f} to {np.nanmax(link.doppler_ghz[v]):+.1f} GHz, "
                              f"peak ground-telescope slew {np.nanmax(link.pointing_a.slew_rate_deg_s[v]):.2f} deg/s")
-                data_min = float(np.sum(link.adaptive_throughput_gbps > 0)) * cfg.step_s / 60
-                lines.append(f"   usable data flowing {data_min:.1f} min; best-modulation data delivered "
-                             f"{np.sum(link.adaptive_throughput_gbps) * cfg.step_s / 8 / 1000:.1f} TB")
+        rt = self.route
+        if rt is not None:
+            if self.network_link is not None:
+                net = self.network_link
+                kinds = {1: "direct", 2: "2-hop via one GEO relay", 3: "3-hop via two GEO relays", 0: "no route"}
+                share = {kinds[k]: 100.0 * float(np.mean(rt.kind == k)) for k in (1, 2, 3, 0) if np.any(rt.kind == k)}
+                lines.append(f"GEO relay network ON ({len(self.relay_tracks)} relays, {cfg.relay.aperture_m*1000:.0f} mm terminals, {cfg.relay.tx_power_w:g} W EDFAs, "
+                             f"{cfg.relay.divergence_urad:g} urad beams): usable data {rt.uptime_pct:.3f} % of the scenario "
+                             f"(direct beam alone: {rt.direct_uptime_pct:.3f} %)")
+                lines.append("   time on each path: " + ", ".join(f"{k} {v:.1f} %" for k, v in share.items()))
+                if net.visible.any():
+                    lat = net.latency_ms[net.visible]
+                    lines.append(f"   end-to-end latency {lat.min():.1f}-{lat.max():.1f} ms, total path {np.min(net.range_km[net.visible]):.0f}-{np.max(net.range_km[net.visible]):.0f} km, "
+                                 f"{len(rt.handovers)} handovers ({rt.n_hitless} make-before-break/hitless), data delivered {rt.total_data_tb:.1f} TB "
+                                 f"(direct alone: {float(rt.direct_data_tb_cumulative[-1]):.1f} TB)")
+            else:
+                lines.append(f"GEO relay network OFF: direct beam only, usable data {rt.direct_uptime_pct:.3f} % of the scenario, {rt.total_data_tb:.1f} TB delivered")
         for (i, j), w in self.crosslink_windows.items():
             dur = float(np.sum(w[:, 1] - w[:, 0]))
             lines.append(f"Crosslink {self.tracks[i].name} <-> {self.tracks[j].name}: {len(w)} windows, {dur/60:.1f} min of line of sight")
@@ -226,6 +249,10 @@ class SimulationResult:
             cols[f"ber_{m}"] = link.ber[m]
             cols[f"throughput_{m}_gbps"] = link.throughput_gbps[m]
         cols["throughput_best_gbps"] = link.adaptive_throughput_gbps
+        if self.route is not None:
+            cols["route"] = [self.route.label(k) for k in range(self.n)]
+            cols["hops"] = self.route.hop_count
+            cols["data_cumulative_tb"] = self.route.data_tb_cumulative
         cols[f"{tr.name}_lat_deg"], cols[f"{tr.name}_lon_deg"], cols[f"{tr.name}_alt_km"] = tr.lat_deg, tr.lon_deg, tr.alt_km
         cols[f"{tr.name}_sun_visibility"] = tr.sun_visibility
         cols[f"{tr.name}_radiator_c"], cols[f"{tr.name}_solar_power_w"] = tr.radiator_temp_c, tr.solar_power_w
@@ -262,6 +289,17 @@ def run_simulation(cfg: SimulationConfig, progress: Callable[[str, float], None]
         link = compute_ground_link(t_s, cfg.ground, r_st, v_st, tr, topo[k], cfg.link, cfg.atmosphere, effects)
         ground_links[k] = link
         access[k] = oe.mask_to_intervals(link.locked, t_s)
+    direct_windows = dict(access)
+    relay_tracks, route, network_link = [], None, None
+    tgt = cfg.target_index
+    if cfg.relay.enabled:
+        say("GEO relay ring and multi-hop routing ...", 0.72)
+        relay_tracks = [oe.geo_relay_track(r, gmst) for r in cfg.relay.relays]
+    route, net = compute_routes(t_s, cfg.ground, r_st, v_st, tracks[tgt], topo[tgt], ground_links[tgt], relay_tracks, cfg.link, cfg.relay, cfg.atmosphere,
+                                effects, cfg.los_buffer_km)
+    if cfg.relay.enabled:
+        network_link = net
+        access[tgt] = oe.mask_to_intervals(net.locked, t_s)
     crosslinks, cross_windows = {}, {}
     pairs = list(combinations(range(len(tracks)), 2))
     for n, (i, j) in enumerate(pairs):
@@ -274,4 +312,4 @@ def run_simulation(cfg: SimulationConfig, progress: Callable[[str, float], None]
                 "sunlit": oe.state_intervals(tr.eclipse, t_s, oe.ECLIPSE_SUNLIT)} for tr in tracks]
     say("Done", 1.0)
     return SimulationResult(cfg, t_s, sun, gmst, tracks, r_st, sun_el, topo, ground_links, access, crosslinks, cross_windows, eclipse,
-                            event_list, effects)
+                            event_list, effects, relay_tracks, route, network_link, direct_windows)

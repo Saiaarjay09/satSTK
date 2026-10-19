@@ -45,6 +45,19 @@ class ConditionsPanel(QWidget):
         f.addRow(place)
         root.addWidget(g)
 
+        # ---- GEO relay network ------------------------------------------------------------------------------------------
+        g, f = self._group("GEO OPTICAL RELAY NETWORK")
+        self.geo_on = QCheckBox("GEO relay network ON  (3 satellites: IND, ATL, PAC)")
+        self.geo_on.setToolTip("ON: the beam can go ground → GEO → satellite (or via two GEO relays) whenever the satellite is not directly visible. "
+                               "OFF: direct ground → satellite passes only.")
+        self.geo_on.toggled.connect(self._edited)
+        f.addRow(self.geo_on)
+        self._spin(f, "g_ap", "Relay telescope (mm)", 300, 50, 2000, 0, " mm")
+        self._spin(f, "g_pw", "Relay EDFA power (W)", 10, 0.1, 200, 1, " W")
+        self._spin(f, "g_div", "Relay beam divergence (µrad)", 10, 1, 500, 1, " µrad")
+        self._spin(f, "g_jit", "Relay pointing jitter (µrad)", 1, 0, 100, 1, " µrad")
+        root.addWidget(g)
+
         # ---- weather -------------------------------------------------------------------------------------------------
         g, f = self._group("SKY & WEATHER")
         self.weather = QComboBox()
@@ -148,7 +161,9 @@ class ConditionsPanel(QWidget):
         g = QGroupBox(title)
         g.setStyleSheet("QGroupBox { font-weight: bold; color: #35b6ff; border: 1px solid #263241; border-radius: 4px; margin-top: 8px; padding-top: 6px; }"
                         "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }")
-        return g, QFormLayout(g)
+        form = QFormLayout(g)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        return g, form
 
     def _spin(self, form, key, label, value, lo, hi, decimals, suffix="") -> None:
         sp = QDoubleSpinBox()
@@ -228,6 +243,11 @@ class ConditionsPanel(QWidget):
                 "arr": T.solar_array_area_m2}
         for k, v in vals.items():
             w[k].setValue(float(v))
+        w["g_ap"].setValue(cfg.relay.aperture_m * 1000.0)
+        w["g_pw"].setValue(cfg.relay.tx_power_w)
+        w["g_div"].setValue(cfg.relay.divergence_urad)
+        w["g_jit"].setValue(cfg.relay.jitter_urad)
+        self.geo_on.setChecked(cfg.relay.enabled)
         st = oe.as_utc(cfg.start)
         self.start.setDateTime(QDateTime(st.year, st.month, st.day, st.hour, st.minute, 0))
         self.step.setCurrentText(f"{cfg.step_s:g} s" if f"{cfg.step_s:g} s" in ("1 s", "10 s", "30 s") else "10 s")
@@ -273,6 +293,9 @@ class ConditionsPanel(QWidget):
         L = cfg.link
         L.tx_power_w, L.divergence_urad, L.pointing_jitter_urad, L.rx_aperture_m = v["tx"], v["div"], v["jit"], v["aper"]
         L.symbol_rate_gbaud, L.implementation_penalty_db = v["rate"], v["pen"]
+        cfg.relay.enabled = self.geo_on.isChecked()
+        cfg.relay.aperture_m, cfg.relay.tx_power_w = v["g_ap"] / 1000.0, v["g_pw"]
+        cfg.relay.divergence_urad, cfg.relay.jitter_urad = v["g_div"], v["g_jit"]
         cfg.thermal.internal_dissipation_w, cfg.thermal.radiator_area_m2, cfg.thermal.solar_array_area_m2 = v["diss"] * 1000.0, v["rad"], v["arr"]
         cfg.events = self.events_config()
         return cfg

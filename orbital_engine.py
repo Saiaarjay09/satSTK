@@ -338,11 +338,11 @@ class GroundStation:
     `min_elevation_deg` is the lowest angle above the horizon at which the beam may be used (optical stations normally need 15-30
     degrees: below that the beam crosses too much air and, in practice, trees, buildings and hills).
     """
-    name: str = "Teide OGS"
-    lat_deg: float = 28.30            # default: the Teide Observatory optical ground station, Tenerife
-    lon_deg: float = -16.51
-    alt_m: float = 2390.0
-    min_elevation_deg: float = 20.0
+    name: str = "GS-INDIA"
+    lat_deg: float = 13.0             # default: the South India ground station (near Bengaluru); change it freely
+    lon_deg: float = 77.5
+    alt_m: float = 900.0              # assumed: the Deccan plateau; edit to your site
+    min_elevation_deg: float = 10.0
 
     def ecef(self) -> np.ndarray:
         return geodetic_to_ecef(self.lat_deg, self.lon_deg, self.alt_m / 1000.0)
@@ -414,6 +414,53 @@ def horizon_cap_radius_deg(altitude_km: float, min_elevation_deg: float = 0.0) -
     r = R_EARTH + altitude_km
     el = math.radians(min_elevation_deg)
     return math.degrees(math.acos(R_EARTH * math.cos(el) / r) - el)
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# 5c. Geostationary relay satellites
+# ----------------------------------------------------------------------------------------------------------------------
+SIDEREAL_DAY_S = 23 * 3600 + 56 * 60 + 4        # 23 h 56 min 04 s: one turn of the Earth relative to the stars
+GEO_RADIUS_KM = (MU_EARTH * (SIDEREAL_DAY_S / (2.0 * math.pi)) ** 2) ** (1.0 / 3.0)    # 42,164 km from the Earth's centre
+GEO_ALTITUDE_KM = GEO_RADIUS_KM - R_EARTH       # about 35,786 km above the equator
+
+
+@dataclass
+class GeoRelayConfig:
+    """
+    One geostationary relay satellite: equatorial (0 degree inclination), 35,786 km up, one orbit per sidereal day, so it hangs at a fixed
+    longitude over the equator. Real GEO satellites hold that spot with small thruster burns ("station keeping"); the simulator
+    idealises this as a perfectly fixed point in the Earth-fixed frame.
+    """
+    name: str
+    short: str
+    lon_deg: float                      # east longitude of the fixed point on the equator
+
+
+def default_geo_relays() -> list:
+    """The three-node ring: Indian Ocean (above the South India station), Atlantic, Pacific. Spacing is about 120 degrees."""
+    return [GeoRelayConfig("GEO-Relay-IND", "GEO-IND", 77.5),
+            GeoRelayConfig("GEO-Relay-ATL", "GEO-ATL", 315.0 - 360.0),       # 315 E = 45 W
+            GeoRelayConfig("GEO-Relay-PAC", "GEO-PAC", 195.0 - 360.0)]       # 195 E = 165 W
+
+
+@dataclass
+class RelayTrack:
+    name: str
+    short: str
+    lon_deg: float
+    r_eci: np.ndarray            # (n,3) km
+    v_eci: np.ndarray            # (n,3) km/s
+    r_ecef: np.ndarray           # (n,3) km, constant
+
+
+def geo_relay_track(cfg: GeoRelayConfig, gmst: np.ndarray) -> RelayTrack:
+    """Position and velocity of a geostationary satellite: fixed in the Earth frame, carried round by the Earth's rotation in the inertial frame."""
+    lon = math.radians(cfg.lon_deg)
+    r_fixed = GEO_RADIUS_KM * np.array([math.cos(lon), math.sin(lon), 0.0])
+    r_ecef = np.repeat(r_fixed[None, :], len(gmst), axis=0)
+    r_eci = ecef_to_eci(r_ecef, gmst)
+    v_eci = np.stack([-OMEGA_EARTH * r_eci[:, 1], OMEGA_EARTH * r_eci[:, 0], np.zeros(len(gmst))], axis=1)
+    return RelayTrack(cfg.name, cfg.short, cfg.lon_deg, r_eci, v_eci, r_ecef)
 
 
 # ----------------------------------------------------------------------------------------------------------------------

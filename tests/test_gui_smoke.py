@@ -9,6 +9,7 @@ import events as ev  # noqa: E402
 import main_app  # noqa: E402
 import orbital_engine as oe  # noqa: E402
 import simulation as sim  # noqa: E402
+from helpers import direct_cfg  # noqa: E402
 from ui import geo, map_view  # noqa: E402
 
 
@@ -17,7 +18,7 @@ def window():
     QApplication, MainWindow, theme = main_app.build_window_classes()
     app = QApplication.instance() or QApplication([])
     theme.apply_dark_theme(app)
-    win = MainWindow(sim.SimulationConfig(duration_h=24, step_s=30))
+    win = MainWindow(direct_cfg(duration_h=24, step_s=30))
     win.resize(1700, 950)
     win.start_simulation(win.cfg, synchronous=True)
     win.show()
@@ -106,7 +107,7 @@ def test_active_events_are_listed_in_telemetry(window):
 def test_conditions_panel_round_trips_and_edits_flow_into_the_config(window):
     win, app = window
     panel = win.conditions
-    base = sim.SimulationConfig(satellites=sim.two_satellites(), target_index=1)
+    base = direct_cfg(satellites=sim.two_satellites(), target_index=1)
     panel.load(base)
     cfg = panel.config(base)
     assert len(cfg.satellites) == 2 and cfg.target_index == 1 and cfg.ground.lat_deg == pytest.approx(base.ground.lat_deg)
@@ -125,17 +126,17 @@ def test_conditions_panel_round_trips_and_edits_flow_into_the_config(window):
     assert panel._w["cloud"].value() == 25.0 and panel.config(base).atmosphere.label == "Overcast"
     panel.second.setChecked(False)
     assert len(panel.config(base).satellites) == 1
-    panel.load(sim.SimulationConfig())
+    panel.load(direct_cfg())
 
 
 def test_changing_a_condition_changes_the_result(window):
     win, app = window
     panel = win.conditions
-    panel.load(sim.SimulationConfig())
+    panel.load(direct_cfg())
     base = sim.run_simulation(panel.config(win.cfg))
     panel.weather.setCurrentText("Overcast")
     cloudy = sim.run_simulation(panel.config(win.cfg))
-    panel.load(sim.SimulationConfig())
+    panel.load(direct_cfg())
     assert cloudy.primary_link.adaptive_throughput_gbps.max() < base.primary_link.adaptive_throughput_gbps.max()
 
 
@@ -181,6 +182,10 @@ def test_ctrl_click_on_the_map_requests_a_station_move(window):
     ev_ = QMouseEvent(QMouseEvent.Type.MouseButtonPress, pos, win.map.mapToGlobal(pos), Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier)
     win.map.mousePressEvent(ev_)
     assert got == [(0.0, 0.0)]
+    assert win.cfg.ground.lat_deg == 0.0 and win.cfg.ground.lon_deg == 0.0               # the window moved the station there (and recomputed)
+    restored = direct_cfg(duration_h=24, step_s=30)                                       # put the default station back for the other tests
+    win.conditions.load(restored)
+    win.start_simulation(restored, synchronous=True)
 
 
 def test_land_data_and_mask_present():
@@ -216,3 +221,49 @@ def test_selftest_cli(tmp_path):
     f = tmp_path / "st.txt"
     assert main_app.main(["--selftest", "--selftest-file", str(f)]) == 0
     assert "SELFTEST OK" in f.read_text(encoding="utf-8")
+
+
+# ---- GEO relay controls ------------------------------------------------------------------------------------------------
+def test_geo_toggle_recomputes_and_the_views_follow(window):
+    win, app = window
+    assert win.result.network_link is None and not win.geo_btn.isChecked()               # the fixture scenario has the relay off
+    win.geo_btn.setChecked(True)                                                          # the toolbar switch drives the Conditions checkbox
+    assert win.conditions.geo_on.isChecked() and win.geo_btn.text() == "GEO relay: ON"
+    cfg = win.conditions.config(win.cfg)
+    assert cfg.relay.enabled
+    win.start_simulation(cfg, synchronous=True)
+    win.clock.seek(float(win.result.t_s[int(np.argmax(win.result.route.kind == 3))]))
+    app.processEvents()
+    assert win.result.network_link is not None and win.result.route.uptime_pct == pytest.approx(100.0)
+    assert "GEO-ATL" in win.telemetry._route_label.text() or "GEO-PAC" in win.telemetry._route_label.text()
+    assert win.telemetry._route["relay"].text() == "ON" and "100.000" in win.telemetry._route["uptime"].text()
+    assert win.globe._scale_combo.isVisibleTo(win.globe) is True
+    for mode in (1, 0):                                                                   # true scale, then compressed
+        win.globe._scale_combo.setCurrentIndex(mode)
+        app.processEvents()
+        assert _colors(win.globe) > 40
+    for w in (win.map, win.timeline, win.telemetry):
+        assert _colors(w) > 40
+    win.geo_btn.setChecked(False)
+    win.start_simulation(win.conditions.config(win.cfg), synchronous=True)
+    assert win.result.network_link is None and win.telemetry._route["relay"].text().startswith("OFF")
+    assert not win.globe._scale_combo.isVisibleTo(win.globe)
+
+
+def test_globe_squash_keeps_leo_and_compresses_geo(window):
+    win, app = window
+    from ui.globe_view import GlobeView
+    g = GlobeView()
+    leo, geo = np.array([[6978.0, 0.0, 0.0]]), np.array([[oe.GEO_RADIUS_KM, 0.0, 0.0]])
+    assert g._squash(leo) == pytest.approx(leo)                                           # LEO is never distorted
+    assert 7500 < g._squash(geo)[0, 0] < 15000 and g._squash(geo)[0, 1] == 0.0            # GEO is pulled in, same direction
+    g.scale_mode = "true"
+    assert g._squash(geo) == pytest.approx(geo)
+
+
+def test_default_cli_summary_shows_the_relay(capsys):
+    assert main_app.main(["--headless"]) == 0
+    out = capsys.readouterr().out
+    assert "GEO relay network ON" in out and "GS-INDIA" in out
+    assert main_app.main(["--headless", "--no-geo-relay"]) == 0
+    assert "GEO relay network OFF" in capsys.readouterr().out

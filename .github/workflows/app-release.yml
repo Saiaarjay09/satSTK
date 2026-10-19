@@ -120,4 +120,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           ls -la files
-          gh release create "$GITHUB_REF_NAME" files/* --title "satSTK ${GITHUB_REF_NAME#v}" --notes-file RELEASE_NOTES.md
+          # the first line of RELEASE_NOTES.md ("# v2.0.0: ...") is the release title; the rest is the body
+          TITLE=$(head -n 1 RELEASE_NOTES.md | sed 's/^# *//')
+          tail -n +2 RELEASE_NOTES.md > release_body.md
+          gh release create "$GITHUB_REF_NAME" files/* --title "$TITLE" --notes-file release_body.md

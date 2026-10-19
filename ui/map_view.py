@@ -220,7 +220,14 @@ class MapView(QWidget):
         gs = res.config.ground
         tgt = res.target
         state, reason = res.beam_state(i)
-        beam_color = {"locked": QColor(theme.GREEN), "degraded": QColor(theme.AMBER), "blocked": QColor(theme.RED)}[state]
+        route = res.route
+        n_hops = int(route.kind[i]) if route is not None else 1
+        if state == "blocked":
+            beam_color = QColor(theme.RED)
+        elif state == "degraded":
+            beam_color = QColor(theme.AMBER)
+        else:
+            beam_color = QColor("#00e5ff") if n_hops >= 2 else QColor("#39ff14")
         alt = float(np.mean(res.tracks[tgt].alt_km))
         mask_lon, mask_lat = footprint_polygon(gs.lat_deg, gs.lon_deg, math.radians(oe.horizon_cap_radius_deg(alt, gs.min_elevation_deg)))
         p.save()
@@ -233,10 +240,33 @@ class MapView(QWidget):
         p.restore()
         tl, tn = res.tracks[tgt].lat_deg[i], res.tracks[tgt].lon_deg[i]
         gx, gy = self._xy(box, gs.lon_deg, gs.lat_deg)
-        sx_, sy_ = self._xy(box, tn, tl)
-        if abs(gs.lon_deg - tn) < 180.0:
-            p.setPen(QPen(beam_color, 1.8, Qt.PenStyle.DashLine if state == "blocked" else Qt.PenStyle.SolidLine))
-            p.drawLine(QPointF(float(gx), float(gy)), QPointF(float(sx_), float(sy_)))
+
+        # GEO relay sub-points (fixed over the equator)
+        for rt in res.relay_tracks:
+            rx_, ry_ = self._xy(box, rt.lon_deg, 0.0)
+            rx_, ry_ = float(rx_), float(ry_)
+            p.setBrush(QColor("#ffd166"))
+            p.setPen(QPen(QColor("white"), 1.1))
+            p.drawPolygon(QPolygonF([QPointF(rx_, ry_ - 6), QPointF(rx_ + 6, ry_), QPointF(rx_, ry_ + 6), QPointF(rx_ - 6, ry_)]))
+            p.setPen(QColor("#ffd166"))
+            p.setFont(theme.mono_font(8))
+            p.drawText(QPointF(rx_ + 8, ry_ - 6), rt.short)
+
+        # the beam along its route (lines take the short way round the globe; drawn three times to cover the map edge)
+        chain = [(gs.lon_deg, gs.lat_deg)]
+        if state != "blocked" and route is not None:
+            chain += [(res.relay_tracks[k].lon_deg, 0.0) for k in route.nodes(i)]
+        chain.append((float(tn), float(tl)))
+        p.save()
+        p.setClipRect(box)
+        p.setPen(QPen(beam_color, 1.8, Qt.PenStyle.DashLine if state == "blocked" else Qt.PenStyle.SolidLine))
+        for (lo1, la1), (lo2, la2) in zip(chain[:-1], chain[1:]):
+            dlon = (lo2 - lo1 + 180.0) % 360.0 - 180.0
+            for shift in (-360.0, 0.0, 360.0):
+                x1, y1 = self._xy(box, lo1 + shift, la1)
+                x2, y2 = self._xy(box, lo1 + dlon + shift, la2)
+                p.drawLine(QPointF(float(x1), float(y1)), QPointF(float(x2), float(y2)))
+        p.restore()
         p.setBrush(QColor(theme.GREEN))
         p.setPen(QPen(QColor("white"), 1.4))
         gx, gy = float(gx), float(gy)

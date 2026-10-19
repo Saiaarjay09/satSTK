@@ -49,6 +49,13 @@ class GlobeView(QWidget):
         self._combo.addItem("Inertial camera")
         self._combo.currentIndexChanged.connect(self._camera_mode_changed)
         self._combo.setFixedWidth(200)
+        self.scale_mode = "compressed"
+        self._scale_combo = QComboBox(self)
+        self._scale_combo.addItems(["GEO ring: compressed scale", "GEO ring: true scale"])
+        self._scale_combo.setToolTip("True scale shows GEO at its real distance (the Earth looks small); compressed squeezes the space above LEO so both are easy to inspect.")
+        self._scale_combo.currentIndexChanged.connect(self._scale_mode_changed)
+        self._scale_combo.setFixedWidth(200)
+        self._scale_combo.hide()
 
     # ------------------------------------------------------------------ public API
     def set_result(self, result) -> None:
@@ -61,6 +68,7 @@ class GlobeView(QWidget):
             self._combo.addItem(f"Follow {tr.name}")
         self._combo.blockSignals(False)
         self.follow = None
+        self._scale_combo.setVisible(bool(getattr(result, "relay_tracks", None)))
         self.update()
 
     def set_index(self, idx: int) -> None:
@@ -72,8 +80,31 @@ class GlobeView(QWidget):
         self.follow = None if i <= 0 else i - 1
         self.update()
 
+    def _scale_mode_changed(self, i: int) -> None:
+        self.scale_mode = "compressed" if i == 0 else "true"
+        self._grid_key = None
+        self.update()
+
     def resizeEvent(self, ev) -> None:
-        self._combo.move(self.width() - self._combo.width() - 10, 10)
+        self._scale_combo.move(self.width() - self._scale_combo.width() - 10, self.height() - 38)
+        self._combo.move(self.width() - self._combo.width() - 10, self.height() - (72 if self._scale_combo.isVisible() else 38))
+
+    LEO_LIMIT_KM = 7500.0
+    COMPRESS = 0.12
+
+    def _squash(self, pts):
+        """Visual radial compression: the space between the LEO shell and GEO is squeezed so both can be seen at once (identity in true-scale mode)."""
+        pts = np.atleast_2d(np.asarray(pts, dtype=float))
+        if self.scale_mode == "true":
+            return pts
+        r = np.linalg.norm(pts, axis=1)
+        r2 = np.where(r > self.LEO_LIMIT_KM, self.LEO_LIMIT_KM + (r - self.LEO_LIMIT_KM) * self.COMPRESS, r)
+        return pts * (r2 / np.maximum(r, 1e-9))[:, None]
+
+    def _segments(self, a, b, n: int = 28):
+        """Points along the straight line a->b, so the line can be drawn correctly after a non-linear squash."""
+        t = np.linspace(0.0, 1.0, n)[:, None]
+        return np.asarray(a)[None, :] * (1 - t) + np.asarray(b)[None, :] * t
 
     def _camera_angles(self):
         if self.follow is not None and self.result is not None:
@@ -90,8 +121,11 @@ class GlobeView(QWidget):
         return eye, right, up
 
     def _scale(self) -> float:
-        """Pixels per kilometre: the default fits the satellites' orbit with some margin."""
-        return 0.5 * min(self.width(), self.height()) / (1.28 * (oe.R_EARTH + 700.0)) * self.zoom
+        """Pixels per kilometre: the default fits everything that is drawn (the LEO orbit, or the GEO ring when the relay network is on)."""
+        extent = oe.R_EARTH + 700.0
+        if self.result is not None and getattr(self.result, "relay_tracks", None):
+            extent = oe.GEO_RADIUS_KM if self.scale_mode == "true" else float(self._squash(np.array([[oe.GEO_RADIUS_KM, 0.0, 0.0]]))[0, 0])
+        return 0.5 * min(self.width(), self.height()) / (1.18 * extent) * self.zoom
 
     def mousePressEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.LeftButton and self.follow is None:
@@ -221,6 +255,13 @@ class GlobeView(QWidget):
         half = d_px / render_scale / 2.0
         p.drawImage(QRectF(cx - half, cy - half, 2 * half, 2 * half), img)
 
+        # geostationary ring
+        relay_tracks = getattr(res, "relay_tracks", [])
+        if relay_tracks:
+            ang = np.linspace(0.0, 2.0 * math.pi, 241)
+            ring = self._squash(oe.GEO_RADIUS_KM * np.stack([np.cos(ang), np.sin(ang), 0 * ang], axis=1))
+            self._polyline(p, ring, eye, right, up, sc, QPen(QColor(255, 209, 102, 110), 1.2, Qt.PenStyle.DashLine))
+
         # orbit paths: dim path ahead for one revolution, bright trail behind
         step = res.config.step_s
         n_rev = max(2, int(oe.orbital_period_s(res.tracks[0].elements0[0]) / step))
@@ -236,27 +277,64 @@ class GlobeView(QWidget):
             trail.setAlpha(235)
             self._polyline(p, tr.r_eci[j0:i + 1:max(1, stride // 2)], eye, right, up, sc, QPen(trail, 2.2))
 
-        # the beam: from the fixed ground station to the target satellite
+        # the beam: ground station -> (GEO relays) -> target satellite
         link = res.primary_link
         tgt = res.target
         state, reason = res.beam_state(i)
-        beam_color = {"locked": QColor(theme.GREEN), "degraded": QColor(theme.AMBER), "blocked": QColor(theme.RED)}[state]
+        route = res.route
+        n_hops = int(route.kind[i]) if route is not None else 1
+        if state == "blocked":
+            beam_color = QColor(theme.RED)
+        elif state == "degraded":
+            beam_color = QColor(theme.AMBER)
+        else:
+            beam_color = QColor("#00e5ff") if n_hops >= 2 else QColor("#39ff14")       # bright cyan via GEO, neon green direct
         gs_p = res.station_eci[i]
         sat_p = res.tracks[tgt].r_eci[i]
-        (xa, xb), (ya, yb), _ = self._project(np.array([gs_p, sat_p]), eye, right, up, sc)
+        chain = [gs_p]
+        if state != "blocked" and route is not None:
+            chain += [relay_tracks[k].r_eci[i] for k in route.nodes(i)]
+        chain.append(sat_p)
+        pts = np.vstack([self._segments(chain[k], chain[k + 1]) for k in range(len(chain) - 1)])
+        pts = self._squash(pts)
+        sxs, sys_, _ = self._project(pts, eye, right, up, sc)
+        beam_path = QPainterPath()
+        beam_path.moveTo(sxs[0], sys_[0])
+        for k in range(1, len(sxs)):
+            beam_path.lineTo(sxs[k], sys_[k])
+        p.setBrush(Qt.BrushStyle.NoBrush)
         if state == "blocked":
             p.setPen(QPen(beam_color, 1.6, Qt.PenStyle.DashLine))
         else:
             glow_pen = QPen(QColor(beam_color.red(), beam_color.green(), beam_color.blue(), 70), 7)
             glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             p.setPen(glow_pen)
-            p.drawLine(QPointF(xa, ya), QPointF(xb, yb))
+            p.drawPath(beam_path)
             p.setPen(QPen(beam_color, 2.0))
-        p.drawLine(QPointF(xa, ya), QPointF(xb, yb))
+        p.drawPath(beam_path)
+        mid = len(sxs) // 2
         p.setFont(theme.mono_font(9))
         p.setPen(beam_color)
-        elev = link.channel["elevation_deg"][i]
-        p.drawText(QPointF((xa + xb) / 2 + 8, (ya + yb) / 2 - 6), f"{link.range_km[i]:,.0f} km  el {elev:+.0f}°" if elev > -90 else "")
+        p.drawText(QPointF(sxs[mid] + 8, sys_[mid] - 6), f"{link.range_km[i]:,.0f} km · {link.latency_ms[i]:.0f} ms" if np.isfinite(link.latency_ms[i]) else "")
+
+        # GEO relay satellites
+        for k, rt in enumerate(relay_tracks):
+            gx, gy, g_hidden = self._project(self._squash(rt.r_eci[i]), eye, right, up, sc)
+            gcol = QColor("#ffd166")
+            if g_hidden[0]:
+                gcol.setAlpha(80)
+            used = route is not None and k in route.nodes(i) and state != "blocked"
+            p.setBrush(gcol)
+            p.setPen(QPen(QColor("white"), 1.2) if not g_hidden[0] else Qt.PenStyle.NoPen)
+            x0, y0 = gx[0], gy[0]
+            p.drawPolygon([QPointF(x0, y0 - 6.5), QPointF(x0 + 6.5, y0), QPointF(x0, y0 + 6.5), QPointF(x0 - 6.5, y0)])
+            if used:
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(beam_color, 1.6))
+                p.drawEllipse(QPointF(x0, y0), 11, 11)
+            p.setFont(theme.mono_font(9))
+            p.setPen(gcol)
+            p.drawText(QPointF(x0 + 10, y0 + 4), rt.short)
 
         # ground station marker
         gx, gy, g_hidden = self._project(gs_p, eye, right, up, sc)
@@ -309,8 +387,10 @@ class GlobeView(QWidget):
         p.drawText(QPointF(12, 22), f"{res.utc(res.t_s[i]):%m-%d %H:%M:%S} UTC")
         p.setPen(beam_color)
         p.drawText(QPointF(12, 42), f"beam {state.upper()}: {reason}")
+        if route is not None:
+            p.drawText(QPointF(12, 58), route.label(i))
         p.setPen(QColor(theme.DIM))
-        p.drawText(QPointF(12, 58), "green: data · amber: no usable data · red: blocked")
+        p.drawText(QPointF(12, 74), "neon green: direct · cyan: via GEO · amber: no data · red: blocked")
         p.setPen(QColor(theme.DIM))
         p.setFont(theme.mono_font(8))
-        p.drawText(QPointF(12, h - 10), "drag: rotate · wheel: zoom · double-click: reset · inertial view, Earth turns")
+        p.drawText(QPointF(12, h - 10), "drag: rotate · wheel: zoom · double-click: reset")

@@ -10,7 +10,7 @@ from events import CATEGORIES, CATEGORY_COLORS
 
 from . import theme
 
-LABEL_W = 300
+LABEL_W = 330
 ROW_H = 20
 AXIS_H = 24
 
@@ -33,9 +33,14 @@ class TimelineView(QWidget):
         rows = []
         tgt = result.target
         link = result.primary_link
-        above = oe.mask_to_intervals(link.visible, result.t_s)
-        rows.append((f"Above {result.config.ground.min_elevation_deg:g}° mask  ({result.config.ground.name})", [(s_, e_, QColor("#1f7a8c")) for s_, e_ in above], QColor("#4cc9f0"), None))
-        rows.append((f"Beam on {result.tracks[tgt].name}", [(s_, e_, QColor(theme.GREEN)) for s_, e_ in result.primary_windows], QColor(theme.GREEN), None))
+        above = oe.mask_to_intervals(result.ground_links[tgt].visible, result.t_s)     # the DIRECT beam only
+        rows.append((f"Direct LEO passes (>{result.config.ground.min_elevation_deg:g}° mask)", [(s_, e_, QColor("#39ff14")) for s_, e_ in above], QColor("#39ff14"), None))
+        route = result.route
+        if route is not None:
+            path_colors = {1: QColor("#39ff14"), 2: QColor("#00e5ff"), 3: QColor("#7c4dff")}
+            bars = [(s_, e_, path_colors[k]) for k in (1, 2, 3) for s_, e_ in oe.mask_to_intervals(route.kind == k, result.t_s)]
+            rows.append(("Data path: direct / via 1 GEO / via 2 GEO" if result.network_link is not None else "Data path: direct only", bars, QColor("#00e5ff"), None))
+        rows.append((f"Connected to {result.tracks[tgt].name}", [(s_, e_, QColor(theme.GREEN)) for s_, e_ in result.primary_windows], QColor(theme.GREEN), None))
         for k, tr in enumerate(result.tracks):
             ecl = result.eclipse_windows[k]
             bars = [(s_, e_, QColor(theme.AMBER)) for s_, e_ in ecl["penumbra"]] + [(s_, e_, QColor(theme.UMBRA)) for s_, e_ in ecl["umbra"]]
@@ -121,7 +126,7 @@ class TimelineView(QWidget):
         # legend
         p.setFont(theme.mono_font(8))
         lx = 8.0
-        for text, col, w in (("beam", theme.GREEN, 50), ("penumbra", theme.AMBER, 76), ("umbra", theme.UMBRA, 60)):
+        for text, col, w in (("direct", "#39ff14", 62), ("1 GEO", "#00e5ff", 58), ("2 GEO", "#7c4dff", 58), ("penumbra", theme.AMBER, 76), ("umbra", theme.UMBRA, 60)):
             p.fillRect(QRectF(lx, 8, 9, 9), QColor(col))
             p.setPen(QColor(theme.DIM))
             p.drawText(QPointF(lx + 13, 16), text)

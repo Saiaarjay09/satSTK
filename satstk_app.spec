@@ -22,4 +22,4 @@ exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="satSTK", console=Fals
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="satSTK")
 if sys.platform == "darwin":
     app = BUNDLE(coll, name="satSTK.app", bundle_identifier="org.satstk.app",
-                 info_plist={"CFBundleShortVersionString": "0.3.0", "NSHighResolutionCapable": True})
+                 info_plist={"CFBundleShortVersionString": "2.0.0", "NSHighResolutionCapable": True})
