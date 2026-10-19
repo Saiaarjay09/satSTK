@@ -110,7 +110,7 @@ def test_validation_rejects_bad_input():
 def test_csv_export_and_summary(tmp_path, result):
     p = tmp_path / "out.csv"
     result.write_csv(p)
-    lines = p.read_text().splitlines()
+    lines = p.read_text(encoding="utf-8").splitlines()
     assert len(lines) == result.n + 1 and lines[0].startswith("t_s,utc,los,range_km")
     text = result.summary_text()
     assert "Orbital-Node-Alpha" in text and "access windows" in text
@@ -122,6 +122,6 @@ def test_no_proprietary_stk_or_windows_com_imports_anywhere():
     root = Path(__file__).resolve().parent.parent
     banned = ("comtypes", "win32com", "pythoncom", "agi.stk", "ansys.stk", "import agi")
     for f in list(root.glob("*.py")) + list(root.glob("ui/*.py")) + [root / "requirements.txt"]:
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         for word in banned:
             assert word not in text, f"{f.name} mentions {word}"

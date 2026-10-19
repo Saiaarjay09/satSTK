@@ -46,10 +46,14 @@ jobs:
       - name: Tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q
+        run: |
+          python -m pytest -q -p no:cacheprovider > tests.log 2>&1 || { echo "::error::$(tr '\n' ' ' < tests.log | tail -c 1800)"; exit 1; }
+          tail -3 tests.log
 
       - name: Package the app
-        run: python -m PyInstaller --noconfirm satstk_app.spec
+        run: |
+          python -m PyInstaller --noconfirm satstk_app.spec > build.log 2>&1 || { echo "::error::$(tr '\n' ' ' < build.log | tail -c 1800)"; exit 1; }
+          tail -2 build.log
 
       - name: Smoke-test the packaged app (macOS)
         if: runner.os == 'macOS'

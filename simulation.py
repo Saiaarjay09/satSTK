@@ -147,7 +147,7 @@ class SimulationResult:
             cols[f"{tr.name}_sun_visibility"] = tr.sun_visibility
             cols[f"{tr.name}_radiator_c"] = tr.radiator_temp_c
             cols[f"{tr.name}_solar_power_w"] = tr.solar_power_w
-        with open(path, "w", newline="") as fh:
+        with open(path, "w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
             w.writerow(cols.keys())
             for k in range(self.n):

@@ -368,7 +368,7 @@ def run_selftest(args) -> int:
     if sys.stdout is not None:
         print(text)
     if args.selftest_file:
-        with open(args.selftest_file, "w") as fh:
+        with open(args.selftest_file, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
     return 0 if ok else 1
 

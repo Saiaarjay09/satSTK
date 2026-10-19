@@ -19,7 +19,7 @@ LAND_FILE = _ROOT / "data" / "land_110m.json"
 def land_rings() -> tuple:
     """Outer rings of the land polygons as (n,2) arrays of [longitude, latitude] degrees. Empty if the data file is missing."""
     try:
-        with open(LAND_FILE) as fh:
+        with open(LAND_FILE, encoding="utf-8") as fh:
             return tuple(np.array(r, dtype=float) for r in json.load(fh)["rings"])
     except (OSError, ValueError, KeyError):
         return ()
