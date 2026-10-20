@@ -560,16 +560,16 @@ def run_selftest(args) -> int:
         win.clock.seek(float(np.mean(res.direct_windows[res.target][0])))
         win.show()
         app.processEvents()
-        for name, widget in (("globe", win.globe), ("map", win.map), ("timeline", win.timeline), ("telemetry", win.telemetry), ("conditions", win.conditions), ("payload dock", win.payload)):
-            if widget is win.payload:
-                win.payload_dock.raise_()                      # a dock tab behind another one is not painted on every platform
-                app.processEvents()
+        for name, widget in (("globe", win.globe), ("map", win.map), ("timeline", win.timeline), ("telemetry", win.telemetry), ("conditions", win.conditions)):
             img = widget.grab().toImage()
             arr = np.frombuffer(img.constBits(), dtype=np.uint8).reshape(img.height(), img.bytesPerLine())[:, : img.width() * 4]
             colours = len(np.unique(arr.reshape(-1, 4), axis=0))
             lines.append(f"{name}: {colours} distinct colours")
             ok = ok and colours > 40
         ok = ok and len(geo.land_rings()) > 100
+        n_routes = win.payload.route_combo.count() - 1                    # the payload dock lists every candidate route (a dock tab behind another is not painted on every platform, so it is not pixel-checked)
+        lines.append(f"payload dock: {n_routes} routes listed")
+        ok = ok and n_routes == len(res.route.labels) > 1
         from optical_dsp_bridge import OrbitalOpticalTransceiver
         from dsp import payload as pl
         trx = OrbitalOpticalTransceiver(res)
