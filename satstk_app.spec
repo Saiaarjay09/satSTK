@@ -9,7 +9,7 @@ for pkg in ("skyfield", "pyqtgraph", "scipy"):       # skyfield ships its leap-s
     datas += d
     binaries += b
     hiddenimports += h
-hiddenimports += ["orbital_engine", "laser_link_engine", "atmosphere", "events", "simulation", "optical_dsp_bridge", "dsp", "dsp.transmitter", "dsp.channel", "dsp.receiver", "dsp.payload", "ui.payload_panel", "ui.clock", "ui.conditions_panel", "ui.events_dialog",
+hiddenimports += ["orbital_engine", "laser_link_engine", "atmosphere", "events", "simulation", "optical_dsp_bridge", "telemetry_broadcaster", "thermal_loop", "dsp", "dsp.transmitter", "dsp.channel", "dsp.receiver", "dsp.payload", "ui.payload_panel", "ui.clock", "ui.conditions_panel", "ui.events_dialog",
                   "ui.geo", "ui.globe_view", "ui.map_view", "ui.placement_dialog", "ui.telemetry_panel", "ui.theme", "ui.timeline_view"]
 
 QT_UNUSED = ["PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineQuick", "PySide6.QtQuick", "PySide6.QtQml",

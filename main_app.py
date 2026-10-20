@@ -53,6 +53,16 @@ def parse_args(argv=None) -> argparse.Namespace:
     d.add_argument("--stream", action="store_true", help="stream the payload frame by frame over --stream-minutes of orbit instead of one shot")
     d.add_argument("--frame-bytes", type=int, default=1024, help="frame size for --stream")
     d.add_argument("--stream-minutes", type=float, default=120.0, help="simulated time the stream is spread over")
+    t = ap.add_argument_group("digital twin: stream live telemetry to satCAD (UDP, loopback only, 30 Hz)")
+    t.add_argument("--broadcast", action=argparse.BooleanOptionalAction, default=None,
+                   help="stream telemetry to 127.0.0.1 for satCAD's digital twin. The window streams by default while it plays (--no-broadcast to stop it); "
+                        "with --headless, --broadcast starts a real-time streaming run")
+    t.add_argument("--broadcast-port", type=int, default=9876, help="UDP port to send telemetry to on 127.0.0.1 (default 9876)")
+    t.add_argument("--status-port", type=int, default=9877, help="UDP port to listen on for satCAD's status datagrams (default 9877)")
+    t.add_argument("--speed", type=float, default=None, help="playback speed (simulated seconds per real second); default 300 in the window, 60 headless")
+    t.add_argument("--autoplay", action="store_true", help="start playing as soon as the scenario is computed (window)")
+    t.add_argument("--no-placement", action="store_true", help="skip the 'place the beam origin' window and use the default station (for launchers)")
+    t.add_argument("--wall-seconds", type=float, default=None, help="with --headless --broadcast: stop after this many real seconds (default: run until Ctrl-C)")
     ap.add_argument("--version", action="version", version=f"satSTK {__version__}")
     return ap.parse_args(argv)
 
@@ -134,6 +144,43 @@ def run_transmit(args) -> int:
     return 0 if out.crc_ok else 1
 
 
+def run_broadcast_headless(args) -> int:
+    """Real-time telemetry without a window: step through the scenario at --speed and stream it to satCAD at 30 Hz until Ctrl-C (or --wall-seconds)."""
+    import time
+    from simulation import run_simulation
+    from telemetry_broadcaster import DigitalTwinSource, TelemetryBroadcaster
+    result = run_simulation(config_from_args(args))
+    source = DigitalTwinSource(result)
+    speed = args.speed if args.speed else 60.0
+    t_end = float(result.t_s[-1])
+    t0 = (args.at_hours or 0.0) * 3600.0
+    bc = TelemetryBroadcaster(port=args.broadcast_port, status_port=args.status_port)
+    print(f"Streaming digital-twin telemetry to 127.0.0.1:{bc.port} at 30 Hz, simulated time x{speed:g} (Ctrl-C to stop).")
+    if bc.listener_error:
+        print(f"  note: {bc.listener_error}")
+    wall0 = time.monotonic()
+    next_print = wall0
+    try:
+        while True:
+            now = time.monotonic()
+            if args.wall_seconds is not None and now - wall0 >= args.wall_seconds:
+                break
+            t = (t0 + speed * (now - wall0)) % t_end if t_end > 0 else 0.0
+            bc.tick(lambda seq, t=t: source.packet_at(t, seq), playing=True)
+            if now >= next_print:
+                pk = source.packet_at(t, bc.seq)
+                print(f"  T+{t / 3600:6.3f} h  {pk['active_relay_id']:15s} core {pk['thermal_state']['core_temp_c']:5.1f} C  "
+                      f"{pk['dsp_metrics']['modulation']:6s} {pk['dsp_metrics']['throughput_gbps']:7.1f} Gbps  sent {bc.sent}  {bc.status_text()}")
+                next_print = now + 2.0
+            time.sleep(0.004)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        bc.close()
+    print(f"Stopped after {bc.sent} packets ({bc.failed} not accepted by the operating system).")
+    return 0
+
+
 def build_window_classes():
     """Qt classes are created lazily so `--headless` and the physics tests never need a display or PySide6."""
     from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
@@ -171,8 +218,11 @@ def build_window_classes():
                 self.failed.emit(f"{type(exc).__name__}: {exc}")
 
     class MainWindow(QMainWindow):
-        def __init__(self, cfg: SimulationConfig | None = None):
+        def __init__(self, cfg: SimulationConfig | None = None, broadcast: bool = False, broadcast_port: int = 9876, status_port: int = 9877, autoplay: bool = False):
             super().__init__()
+            self._broadcast_wanted, self._bc_ports, self._autoplay = broadcast, (broadcast_port, status_port), autoplay
+            self.broadcaster = None
+            self.twin_source = None
             self.setWindowTitle(f"satSTK {__version__} - Orbital Mission & Laser Link Simulator")
             self.resize(1700, 960)
             self.cfg = cfg or SimulationConfig()
@@ -217,6 +267,11 @@ def build_window_classes():
             self.progress.setRange(0, 100)
             self.progress.hide()
             self.statusBar().addPermanentWidget(self.progress)
+            self.twin_label = QLabel("Digital twin: off")
+            self.statusBar().addPermanentWidget(self.twin_label)
+            self._twin_label_timer = QTimer(self)
+            self._twin_label_timer.setInterval(1000)
+            self._twin_label_timer.timeout.connect(self._update_twin_label)
 
             self._debounce = QTimer(self)
             self._debounce.setSingleShot(True)
@@ -230,6 +285,8 @@ def build_window_classes():
             self.conditions.apply_btn.clicked.connect(self.recompute_from_panel)
             self.conditions.place_requested.connect(self.place_station)
             self.conditions.events_requested.connect(self.edit_events)
+            if self._broadcast_wanted:
+                self.set_broadcast(True)
             self.map.station_move_requested.connect(self._station_clicked)
 
         # ---------------------------------------------------------------- layout helpers
@@ -326,6 +383,12 @@ def build_window_classes():
                 act.setShortcut(QKeySequence(key))
                 act.triggered.connect(fn)
                 m.addAction(act)
+            m.addSeparator()
+            self.broadcast_action = QAction("Stream live telemetry to satCAD (digital twin)", self)
+            self.broadcast_action.setCheckable(True)
+            self.broadcast_action.setChecked(self._broadcast_wanted)
+            self.broadcast_action.toggled.connect(self.set_broadcast)
+            m.addAction(self.broadcast_action)
             m = self.menuBar().addMenu("&Help")
             act = QAction("About / limits of this model", self)
             act.triggered.connect(self.about)
@@ -393,11 +456,20 @@ def build_window_classes():
             self.timeline.set_result(result)
             self.telemetry.set_result(result)
             self.payload.set_result(result)
+            try:
+                from telemetry_broadcaster import DigitalTwinSource
+                self.twin_source = DigitalTwinSource(result)
+            except Exception as exc:                           # the twin feed is optional: never let it break the simulation view
+                self.twin_source = None
+                self.twin_label.setText(f"Digital twin: cannot build telemetry ({exc})")
             self.clock.configure(result.t_s[-1], result.config.step_s)
             t0 = self._keep_time if self._keep_time is not None else self._first_pass_time()
             self._keep_time = None
             self.clock.seek(min(t0, result.t_s[-1]))
             self._on_time(self.clock.t)
+            if self._autoplay:
+                self._autoplay = False
+                self.clock.play()
             gs = result.config.ground
             n_pass = len(result.primary_windows)
             rt = result.route
@@ -492,6 +564,57 @@ def build_window_classes():
             self.payload.set_time(t)
             self.time_label.setText(f"{self.result.utc(t):%Y-%m-%d %H:%M:%S} UTC    T+ {t / 3600:6.3f} h")
 
+        # ---------------------------------------------------------------- digital twin telemetry
+        def set_broadcast(self, on: bool) -> None:
+            """Start or stop streaming telemetry to satCAD (127.0.0.1 only). Never raises: a problem is shown in the status bar."""
+            if on and self.broadcaster is None:
+                try:
+                    from telemetry_broadcaster import TelemetryBroadcaster
+                    self.broadcaster = TelemetryBroadcaster(port=self._bc_ports[0], status_port=self._bc_ports[1])
+                except Exception as exc:
+                    self.broadcaster = None
+                    self.twin_label.setText(f"Digital twin: unavailable ({exc})")
+                    self.twin_label.setStyleSheet(f"color: {theme.RED};")
+                    return
+                self._old_switch_interval = sys.getswitchinterval()
+                sys.setswitchinterval(0.0005)                  # let the feed thread get the interpreter within 0.5 ms even while the window is busy painting
+                self.broadcaster.start_feed(self._twin_packet, lambda: self.clock.playing)      # its own thread: the 30 Hz wall-clock rate holds while the window repaints
+                self._twin_label_timer.start()
+            elif not on and self.broadcaster is not None:
+                sys.setswitchinterval(getattr(self, "_old_switch_interval", 0.005))
+                self._twin_label_timer.stop()
+                self.broadcaster.close()
+                self.broadcaster = None
+            if hasattr(self, "broadcast_action") and self.broadcast_action.isChecked() != on and (on == (self.broadcaster is not None)):
+                self.broadcast_action.setChecked(on)
+            self._update_twin_label()
+
+        def _twin_packet(self, seq: int):
+            """Called on the feed thread: only reads (the simulation arrays and the clock's current time), never touches a widget."""
+            src = self.twin_source
+            return None if src is None else src.packet_at(self.clock.t, seq)
+
+        def _update_twin_label(self) -> None:
+            bc = self.broadcaster
+            if bc is None:
+                self.twin_label.setText("Digital twin: off")
+                self.twin_label.setStyleSheet(f"color: {theme.DIM};")
+            else:
+                st = bc.status
+                self.twin_label.setText(bc.status_text())
+                self.twin_label.setStyleSheet(f"color: {theme.GREEN if st.connected else theme.AMBER};")
+
+        def set_speed_value(self, speed: float) -> None:
+            i = self.speed.findData(float(speed))
+            if i < 0:
+                self.speed.addItem(f"{speed:g}x", float(speed))
+                i = self.speed.count() - 1
+            self.speed.setCurrentIndex(i)
+
+        def closeEvent(self, ev) -> None:
+            self.set_broadcast(False)
+            super().closeEvent(ev)
+
         def _on_state(self, playing: bool) -> None:
             self.btn_play.setText("⏸ Pause" if playing else "▶ Play")
 
@@ -503,7 +626,11 @@ def run_gui(args) -> int:
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("satSTK")
     theme.apply_dark_theme(app)
-    win = MainWindow(config_from_args(args))
+    stream = args.broadcast is not False and not args.screenshot and not args.selftest
+    win = MainWindow(config_from_args(args), broadcast=stream, broadcast_port=args.broadcast_port, status_port=args.status_port,
+                     autoplay=args.autoplay and not args.screenshot)
+    if args.speed:
+        win.set_speed_value(args.speed)
     if args.screenshot:
         w, h = (int(v) for v in args.size.lower().split("x"))
         win.resize(w, h)
@@ -530,7 +657,7 @@ def run_gui(args) -> int:
         return 0
     win.show()
     app.processEvents()
-    if args.lat is None and args.lon is None:
+    if args.lat is None and args.lon is None and not args.no_placement:
         win.place_station()                    # first step: put the beam origin on the map; Cancel keeps the default station
         if win.result is None and win._thread is None:
             win.start_simulation(win.cfg)
@@ -598,6 +725,8 @@ def main(argv=None) -> int:
         return run_selftest(args)
     if args.send_text is not None or args.send_file or (args.send_test_payload and not args.screenshot):
         return run_transmit(args)
+    if args.headless and args.broadcast:
+        return run_broadcast_headless(args)
     return run_headless(args) if args.headless else run_gui(args)
 
 
