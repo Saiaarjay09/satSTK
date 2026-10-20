@@ -1,4 +1,5 @@
-# Run the tests (physics checks + an offscreen build of the real window) on Linux and macOS for every push and pull request.
+# Run the tests (physics checks + an offscreen build of the real window) on Linux, macOS and Windows for every push and pull request.
+# On a failure the tail of the log is also written as error annotations, which can be read without opening the raw log.
 name: CI
 on:
   push:
@@ -9,11 +10,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python: ["3.12"]
     runs-on: ${{ matrix.os }}
     env:
       QT_QPA_PLATFORM: offscreen
+      PYTHONFAULTHANDLER: "1"
+      PYTHONUTF8: "1"
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,5 +29,10 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libglib2.0-0
       - run: python -m pip install -r requirements-dev.txt
-      - run: python -m pytest -q
+      - name: Tests
+        run: |
+          python -X faulthandler -m pytest -q -p no:cacheprovider --tb=short -rfE > tests.log 2>&1 && code=0 || code=$?
+          tail -n 40 tests.log
+          if [ "$code" -ne 0 ]; then python tools/ci_annotate.py tests.log "pytest-${{ matrix.os }}"; fi
+          exit $code
       - run: python main_app.py --headless --hours 6
