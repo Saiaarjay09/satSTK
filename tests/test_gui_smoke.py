@@ -20,11 +20,15 @@ def window():
     theme.apply_dark_theme(app)
     win = MainWindow(direct_cfg(duration_h=24, step_s=30))
     win.resize(1700, 950)
+    win.conditions.live.setChecked(False)                                                # no background recomputes while the tests drive the panels
     win.start_simulation(win.cfg, synchronous=True)
     win.show()
     app.processEvents()
     yield win, app
+    win._debounce.stop()                                                                 # never leave a worker thread running when the interpreter exits
+    win._cleanup_thread()
     win.close()
+    app.processEvents()
 
 
 def _colors(widget):
