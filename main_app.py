@@ -561,6 +561,9 @@ def run_selftest(args) -> int:
         win.show()
         app.processEvents()
         for name, widget in (("globe", win.globe), ("map", win.map), ("timeline", win.timeline), ("telemetry", win.telemetry), ("conditions", win.conditions), ("payload dock", win.payload)):
+            if widget is win.payload:
+                win.payload_dock.raise_()                      # a dock tab behind another one is not painted on every platform
+                app.processEvents()
             img = widget.grab().toImage()
             arr = np.frombuffer(img.constBits(), dtype=np.uint8).reshape(img.height(), img.bytesPerLine())[:, : img.width() * 4]
             colours = len(np.unique(arr.reshape(-1, 4), axis=0))

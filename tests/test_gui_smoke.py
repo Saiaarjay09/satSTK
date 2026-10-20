@@ -25,7 +25,11 @@ def window():
     win.show()
     app.processEvents()
     yield win, app
+    win._debounce.stop()                                                                 # never leave a worker thread running when the interpreter exits
+    win._cleanup_thread()
+    win.payload._stop_thread()
     win.close()
+    app.processEvents()
 
 
 def _colors(widget):
@@ -327,6 +331,8 @@ def test_fire_text_payload_through_the_worker_thread_and_see_every_view(window):
     assert p.last.crc_ok and p.last.recovered == p.text.toPlainText().encode()
     assert p.m["route"].text() == "GS-INDIA -> GEO-IND -> NODE-ALPHA" and "QPSK" in p.m["mod"].text() and p.m["ber"].text().startswith("0")
     assert p.diff_tx.toPlainText() == p.diff_rx.toPlainText() == p.text.toPlainText()
+    win.payload_dock.raise_()                                                               # a dock tab behind another one is not painted (Windows' offscreen backend renders it blank)
+    app.processEvents()
     for tab in range(3):
         p.tabs.setCurrentIndex(tab)
         app.processEvents()
