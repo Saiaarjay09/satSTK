@@ -46,14 +46,20 @@ jobs:
       - name: Tests
         env:
           QT_QPA_PLATFORM: offscreen
+          PYTHONFAULTHANDLER: "1"
+          PYTHONUTF8: "1"
         run: |
-          python -m pytest -q -p no:cacheprovider > tests.log 2>&1 || { echo "::error::$(tr '\n' ' ' < tests.log | tail -c 1800)"; exit 1; }
-          tail -3 tests.log
+          python -X faulthandler -m pytest -q -p no:cacheprovider --tb=short -rfE > tests.log 2>&1 && code=0 || code=$?
+          tail -n 40 tests.log
+          if [ "$code" -ne 0 ]; then python tools/ci_annotate.py tests.log "pytest-${{ matrix.label }}"; fi
+          exit $code
 
       - name: Package the app
         run: |
-          python -m PyInstaller --noconfirm satstk_app.spec > build.log 2>&1 || { echo "::error::$(tr '\n' ' ' < build.log | tail -c 1800)"; exit 1; }
-          tail -2 build.log
+          python -m PyInstaller --noconfirm satstk_app.spec > build.log 2>&1 && code=0 || code=$?
+          tail -n 5 build.log
+          if [ "$code" -ne 0 ]; then python tools/ci_annotate.py build.log "pyinstaller-${{ matrix.label }}"; fi
+          exit $code
 
       - name: Smoke-test the packaged app (macOS)
         if: runner.os == 'macOS'
