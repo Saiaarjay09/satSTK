@@ -209,7 +209,7 @@ class SanitizeReport:
 def sanitize_gradients(grads: list, factor: float = NORM_FACTOR) -> SanitizeReport:
     """
     Per-blade gradient screening. A gradient is quarantined if it is missing, contains NaN/Inf, or its L2 norm is more than `factor` times the median
-    of the finite norms. (With only one or two gradients the median is not a robust yardstick, so only the NaN/Inf test is meaningful.)
+    of the finite norms (the lower median, so two gradients [1, 1e30] cannot drag it up). With a single gradient only the NaN/Inf test is meaningful.
     """
     n = len(grads)
     norms, hashes, reasons, finite = [float("nan")] * n, [0] * n, [""] * n, [False] * n
@@ -227,7 +227,9 @@ def sanitize_gradients(grads: list, factor: float = NORM_FACTOR) -> SanitizeRepo
         else:
             finite[i] = True
     good = [norms[i] for i in range(n) if finite[i]]
-    med = float(np.median(good)) if good else float("nan")
+    # The LOWER median: with an even count the usual median averages the two middle norms, so with two gradients [1, 1e30] it would be 5e29 and the 1e30
+    # gradient would pass a "5x median" test. The lower median stays with the healthy value (identical to the plain median for an odd count).
+    med = float(np.sort(good)[(len(good) - 1) // 2]) if good else float("nan")
     accept = [False] * n
     for i in range(n):
         if finite[i]:
@@ -686,6 +688,8 @@ class RadiationTolerantTrainer:
             rep_s = sanitize_gradients([g for _, g in cand], cfg.norm_factor)
             kept, kept_loss = [], []
             for (m, g), ok, why, l in zip(cand, rep_s.accept, rep_s.reasons, cand_loss):
+                if ok and not math.isfinite(l):                                     # a finite gradient from a blade whose own loss is NaN/Inf (saturated softmax) is still a bad blade
+                    ok, why = False, "loss nan/inf"
                 if ok:
                     kept.append(g)
                     kept_loss.append(l)

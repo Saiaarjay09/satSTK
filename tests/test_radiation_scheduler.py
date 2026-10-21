@@ -515,3 +515,28 @@ def test_command_line_demo(capsys):
     assert rps.main(["--hours", "1.2", "--engine", "numpy", "--flare"]) == 0
     out = capsys.readouterr().out
     assert "PROTECTED" in out and "UNPROTECTED" in out and "bit flips" in out and "went NaN" in out
+
+
+def test_sanitizer_catches_a_huge_gradient_even_when_only_two_blades_are_left():
+    # the plain median of [1, 1e30] is 5e29, which would have let the 1e30 gradient through the "5x median" test
+    rep = rps.sanitize_gradients(_grads([1.0, 1e30]))
+    assert rep.accept == [True, False] and rep.median_norm == pytest.approx(1.0, abs=0.06)
+    assert rps.sanitize_gradients(_grads([2.0, 2.2, 1.9, 2.1])).accept == [True] * 4          # a normal even-sized group is untouched
+
+
+def test_a_blade_whose_own_loss_is_not_finite_is_quarantined_even_if_its_gradient_is_finite(monkeypatch):
+    eng = rps.get_engine("numpy")
+    task, w0 = rps.SyntheticTask(0), rps.init_weights(0)
+    tr = rps.RadiationTolerantTrainer(eng, task, w0, True)
+    real = eng.loss_grad
+    calls = {"n": 0}
+
+    def fake(w, X, y):
+        loss, g = real(w, X, y)
+        calls["n"] += 1
+        return (float("inf") if calls["n"] == 5 else loss), g                                  # one blade reports an infinite loss with a perfectly finite gradient
+
+    monkeypatch.setattr(eng, "loss_grad", fake)
+    rep = tr.step(rps.StepEnv(0.0, 20.0, 0.0, -150.0, 600.0), [])
+    assert math.isfinite(rep.loss) and not tr.poisoned
+    assert any(why == "loss nan/inf" for _, why in rep.quarantined)
