@@ -434,7 +434,12 @@ class TelemetryBroadcaster:
             except socket.timeout:
                 continue
             except OSError:
-                return
+                # Windows raises WSAEMSGSIZE (an oversized datagram) or WSAECONNRESET (an ICMP port-unreachable from an earlier send) here, where other
+                # systems truncate or stay quiet: keep listening. Only a closed socket or a stop request ends the thread.
+                if self._stop.is_set() or self._lsock.fileno() == -1:
+                    return
+                time.sleep(0.01)
+                continue
             if len(data) > MAX_STATUS_BYTES:
                 continue
             try:
