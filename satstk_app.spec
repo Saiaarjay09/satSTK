@@ -9,7 +9,7 @@ for pkg in ("skyfield", "pyqtgraph", "scipy"):       # skyfield ships its leap-s
     datas += d
     binaries += b
     hiddenimports += h
-hiddenimports += ["orbital_engine", "laser_link_engine", "atmosphere", "events", "simulation", "optical_dsp_bridge", "telemetry_broadcaster", "thermal_loop", "seu_injector", "radiation_pytorch_scheduler", "ui.radiation_panel", "ui.radiation_overlay", "dsp", "dsp.transmitter", "dsp.channel", "dsp.receiver", "dsp.payload", "ui.payload_panel", "ui.clock", "ui.conditions_panel", "ui.events_dialog",
+hiddenimports += ["orbital_engine", "laser_link_engine", "atmosphere", "events", "simulation", "optical_dsp_bridge", "telemetry_broadcaster", "thermal_loop", "seu_injector", "radiation_pytorch_scheduler", "eps_power_engine", "ui.eps_panel", "ui.radiation_panel", "ui.radiation_overlay", "dsp", "dsp.transmitter", "dsp.channel", "dsp.receiver", "dsp.payload", "ui.payload_panel", "ui.clock", "ui.conditions_panel", "ui.events_dialog",
                   "ui.geo", "ui.globe_view", "ui.map_view", "ui.placement_dialog", "ui.telemetry_panel", "ui.theme", "ui.timeline_view"]
 
 # PyTorch is deliberately NOT bundled (it would add gigabytes): the packaged app trains with the NumPy engine, which gives the same results.
@@ -23,4 +23,4 @@ exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="satSTK", console=Fals
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="satSTK")
 if sys.platform == "darwin":
     app = BUNDLE(coll, name="satSTK.app", bundle_identifier="org.satstk.app",
-                 info_plist={"CFBundleShortVersionString": "2.3.0", "NSHighResolutionCapable": True})
+                 info_plist={"CFBundleShortVersionString": "2.4.0", "NSHighResolutionCapable": True})

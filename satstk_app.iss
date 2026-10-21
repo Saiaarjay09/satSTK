@@ -1,5 +1,5 @@
 ; Inno Setup recipe: turns the PyInstaller output (dist\satSTK) into a Windows installer.
-; Build:  iscc /DAppVersion=2.3.0 satstk_app.iss      -> installer\satSTK-2.3.0-windows-x64-setup.exe
+; Build:  iscc /DAppVersion=2.4.0 satstk_app.iss      -> installer\satSTK-2.4.0-windows-x64-setup.exe
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif

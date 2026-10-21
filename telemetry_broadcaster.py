@@ -143,7 +143,7 @@ def format_timestamp(t) -> str:
 
 
 def build_packet(*, seq: int, timestamp_utc, sun_vector_body_deg: float, active_relay_id: str, active_turret_id: str, turret_angles_deg: dict,
-                 thermal_state: dict, dsp_metrics: dict) -> dict:
+                 thermal_state: dict, dsp_metrics: dict, eps_state: dict | None = None) -> dict:
     """
     Assemble one protocol-v1 telemetry packet from plain values. Pure: no sockets, no clock. Every number is made finite, clamped to the range the
     receiver accepts and rounded (so a packet stays well under 1 KB); an unknown relay / turret / throttle name is replaced by a safe default.
@@ -152,7 +152,7 @@ def build_packet(*, seq: int, timestamp_utc, sun_vector_body_deg: float, active_
     th = thermal_state or {}
     dm = dsp_metrics or {}
     mode = th.get("throttle_mode", tl.NOMINAL)
-    return {
+    pkt = {
         "v": PROTOCOL_VERSION,
         "seq": int(seq),
         "timestamp_utc": format_timestamp(timestamp_utc),
@@ -167,6 +167,13 @@ def build_packet(*, seq: int, timestamp_utc, sun_vector_body_deg: float, active_
         "dsp_metrics": {"modulation": str(dm.get("modulation", "NONE"))[:16], "snr_db": _num(dm.get("snr_db", 0.0), -200.0, 200.0, 2),
                         "ber": _ber(dm.get("ber", 0.5)), "throughput_gbps": _num(dm.get("throughput_gbps", 0.0), 0.0, 1.0e6, 2)},
     }
+    if eps_state is not None:                                    # additive field: older viewers ignore unknown keys
+        e = eps_state
+        pkt["eps_state"] = {"soc_pct": _num(e.get("soc_pct", 0.0), 0.0, 100.0, 2), "busbar_current_a": _num(e.get("busbar_current_a", 0.0), 0.0, 100000.0, 1),
+                            "busbar_temp_c": _num(e.get("busbar_temp_c", 0.0), -273.0, 2000.0, 1), "bank_b_breaker_closed": bool(e.get("bank_b_breaker_closed", True)),
+                            "mode": str(e.get("mode", ""))[:20], "solar_kw": _num(e.get("solar_kw", 0.0), 0.0, 10000.0, 2),
+                            "load_kw": _num(e.get("load_kw", 0.0), 0.0, 10000.0, 2), "min_blade_v": _num(e.get("min_blade_v", 0.0), 0.0, 1000.0, 3)}
+    return pkt
 
 
 def encode_packet(packet: dict) -> bytes:
@@ -195,12 +202,14 @@ class FsmModel:
 class DigitalTwinSource:
     """Packets for a finished `SimulationResult` at any simulation time `t` (seconds since the scenario start)."""
 
-    def __init__(self, result, fsm_seed: int = 1, loop_cfg: tl.ThermalLoopConfig | None = None):
+    def __init__(self, result, fsm_seed: int = 1, loop_cfg: tl.ThermalLoopConfig | None = None, eps_run=None):
         self.result = result
         self.step = result.config.step_s
         self.n = result.n
         self.track = result.tracks[result.target]
-        self.thermal = tl.simulate_loop(self.track.radiator_solar_load_w, self.step, result.config.thermal, loop_cfg)
+        # with an EPS run (eps_power_engine.simulate_eps) the thermal state is the electrical-thermal closed loop and the packets carry `eps_state`
+        self.eps = eps_run.history if eps_run is not None else None
+        self.thermal = eps_run.thermal if eps_run is not None else tl.simulate_loop(self.track.radiator_solar_load_w, self.step, result.config.thermal, loop_cfg)
         self.fsm = FsmModel(fsm_seed)
         self._names = list(MODULATIONS)
 
@@ -264,13 +273,14 @@ class DigitalTwinSource:
             thermal_state=dict(core_temp_c=self._lerp(th.core_temp_c, i0, i1, w), radiator_temp_c=self._lerp(th.radiator_temp_c, i0, i1, w),
                                coolant_flow_lpm=self._lerp(th.coolant_flow_lpm, i0, i1, w), bypass_valve_pct=self._lerp(th.bypass_valve_pct, i0, i1, w),
                                throttle_mode=th.throttle_mode[inear]),
-            dsp_metrics=dict(modulation=mod, snr_db=snr, ber=ber, throughput_gbps=thr))
+            dsp_metrics=dict(modulation=mod, snr_db=snr, ber=ber, throughput_gbps=thr),
+            eps_state=self.eps.eps_state(t) if self.eps is not None else None)
 
     def packet_at(self, t: float, seq: int) -> dict:
         s = self.snapshot(t)
         return build_packet(seq=seq, timestamp_utc=s["timestamp_utc"], sun_vector_body_deg=s["sun_vector_body_deg"], active_relay_id=s["active_relay_id"],
                             active_turret_id=s["active_turret_id"], turret_angles_deg=s["turret_angles_deg"], thermal_state=s["thermal_state"],
-                            dsp_metrics=s["dsp_metrics"])
+                            dsp_metrics=s["dsp_metrics"], eps_state=s.get("eps_state"))
 
 
 # ----------------------------------------------------------------------------------------------------------------------------------

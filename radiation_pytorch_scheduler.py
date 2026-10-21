@@ -321,6 +321,13 @@ class OBCStore:
             self.journal = []
             self.checkpoints_taken += 1
 
+    def checkpoint_now(self) -> None:
+        """Take a checkpoint immediately (verified first): used when the power system warns that the battery is low."""
+        self.reference()
+        self.ckpts = [self._snapshot(), self._snapshot()]
+        self.journal = []
+        self.checkpoints_taken += 1
+
     def reference(self) -> np.ndarray:
         """The verified current weights. Rebuilds from checkpoint + journal if the live copy has been corrupted."""
         if sha256_hex(self.live) != self.live_sha:
@@ -376,6 +383,9 @@ class StepEnv:
     core_temp_c: float = 40.0
     saa_eta_s: float | None = None        # seconds until the SAA (0 inside, None if not within the look-ahead)
     flare: float = 1.0
+    bank_b_powered: bool = True           # the EPS's Bank B 48 V solid-state breaker (False: Bank B has no power)
+    dvfs_speed: float = 1.0               # EPS DVFS eco-clocking: relative training speed of the powered blades
+    eps_mode: str | None = None           # the EPS state machine's mode (e.g. "ECLIPSE SURVIVAL")
 
 
 @dataclass
@@ -429,6 +439,8 @@ class RadiationTolerantTrainer:
                            skipped_updates=0, tmr_steps=0, throttled_steps=0, max_restore_ms=0.0)
         self.poisoned = False
         self._t = 0.0
+        self._eps_survival = False
+        self._bank_b_powered = True
         self.last_loss = float("nan")
 
     # ---- helpers -----------------------------------------------------------------------------------------------------------------
@@ -513,8 +525,20 @@ class RadiationTolerantTrainer:
             rep.events.append(f"core cooled to {env.core_temp_c:.1f} C: Bank B wakes")
         rep.throttled = self.throttled
         self.totals["throttled_steps"] += int(self.throttled)
+        survival = env.eps_mode == "ECLIPSE SURVIVAL"
+        if survival and not self._eps_survival:
+            if self.protected:
+                self.obc.checkpoint_now()
+                rep.events.append("EPS low-battery survival: weights flushed to a fresh OBC checkpoint before Bank B loses power")
+            else:
+                rep.events.append("EPS low-battery survival (no checkpoint: protection is off)")
+        self._eps_survival = survival
+        if env.bank_b_powered != self._bank_b_powered:
+            rep.events.append("EPS: Bank B 48 V breaker OPEN: blades 17-32 lose power, Bank A takes the whole batch" if not env.bank_b_powered
+                              else "EPS: Bank B 48 V breaker closed: blades 17-32 power up")
+            self._bank_b_powered = env.bank_b_powered
         for b in self.blades:
-            b.hibernated = self.throttled and b.idx in BANK_B
+            b.hibernated = (self.throttled or not env.bank_b_powered) and b.idx in BANK_B
         for b in self.blades:                                                       # blades coming back from a power cycle or from hibernation
             up = b.online(t0)
             if b.was_down and up:
@@ -599,7 +623,7 @@ class RadiationTolerantTrainer:
         ids_for = [list(range(total_batches))[u::len(units)] for u in range(len(units))] if units else []
         rep.unique_batches = total_batches if units else 0
         per_unit = max((len(x) for x in ids_for), default=1)
-        rep.rel_throughput = (total_batches / per_unit / N_BLADES) if units else 0.0
+        rep.rel_throughput = (total_batches / per_unit / N_BLADES * env.dvfs_speed) if units else 0.0
         # -- compute the gradients (every blade computes with ITS OWN weights; gradient upsets hit the result) --
         unit_grads, unit_losses = [], []
         for members, ids in zip(units, ids_for):
@@ -782,9 +806,10 @@ class RadiationOrchestrator:
     `advance_to(t)` runs as many training steps as the mission time that has passed calls for.
     """
 
-    def __init__(self, orbit, thermal=None, cfg: OrchestratorConfig | None = None):
+    def __init__(self, orbit, thermal=None, cfg: OrchestratorConfig | None = None, eps=None):
         self.cfg = cfg or OrchestratorConfig()
         self.orbit, self.thermal = orbit, thermal
+        self.eps = eps                       # an eps_power_engine.EPSHistory: Bank B breaker, DVFS and survival mode follow it
         self.engine = get_engine(self.cfg.engine)
         self.task = SyntheticTask(self.cfg.seed)
         self.injector = si.SEUInjector(self.cfg.seed + 1000)
@@ -839,6 +864,10 @@ class RadiationOrchestrator:
         lat, lon, alt = self.orbit.position(self.t)
         env = StepEnv(self.t, dt, lat, lon, alt, (self.thermal(self.t) if self.thermal else 40.0) + self.temp_offset_c,
                       self.orbit.saa_eta(self.t, self.cfg.trainer.lookahead_s) if hasattr(self.orbit, "saa_eta") else None, self.flare)
+        if self.eps is not None:
+            k = self.eps.index_at(self.t)
+            env.bank_b_powered, env.eps_mode = bool(self.eps.bank_b_closed[k]), self.eps.mode[k]
+            env.dvfs_speed = self.eps.cfg.dvfs_speed if bool(self.eps.dvfs[k]) else 1.0
         upsets = self.injector.draw(dt, lat, lon, alt, self.flare) + self._forced
         self._forced = []
         rp = self.protected.step(env, upsets)

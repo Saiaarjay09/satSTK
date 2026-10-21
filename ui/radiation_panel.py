@@ -48,6 +48,7 @@ class RadiationPanel(QWidget):
         self._regions: list = []
         self._region_key = None
         self._engine_pref = "auto"
+        self._eps = None
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 8, 8, 8)
 
@@ -166,9 +167,11 @@ class RadiationPanel(QWidget):
         return rp.flux_mult if rp is not None else 1.0
 
     # ------------------------------------------------------------------ simulation state in
-    def set_result(self, result, thermal_history=None) -> None:
+    def set_result(self, result, thermal_history=None, eps=None) -> None:
+        """`eps` (an eps_power_engine.EPSHistory) makes Bank B's breaker, the DVFS speed and the survival checkpoint flush follow the power system."""
         self.result = result
         self._thermal = rps.CoreTemp(result, thermal_history)
+        self._eps = eps
         self.restart()
 
     def restart(self) -> None:
@@ -176,7 +179,7 @@ class RadiationPanel(QWidget):
             return
         flare, prot, hot = self.flare_btn.isChecked(), self.protect_btn.isChecked(), self.hot_btn.isChecked()
         orbit = rps.TrackOrbit.from_result(self.result)
-        self.orch = rps.RadiationOrchestrator(orbit, self._thermal, rps.OrchestratorConfig(engine=self._engine_pref))
+        self.orch = rps.RadiationOrchestrator(orbit, self._thermal, rps.OrchestratorConfig(engine=self._engine_pref), eps=self._eps)
         self.orch.set_flare(flare)
         self.orch.set_protection(prot)
         self.orch.temp_offset_c = HOT_CORE_OFFSET_C if hot else 0.0

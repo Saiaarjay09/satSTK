@@ -80,14 +80,20 @@ def radiator_equilibrium_c(heat_w: float, absorbed_solar_w, area_m2: float, emis
     return t4 ** 0.25 - 273.15
 
 
-def simulate_loop(absorbed_solar_w: np.ndarray, step_s: float, thermal: oe.ThermalConfig, cfg: ThermalLoopConfig | None = None) -> ThermalHistory:
+def simulate_loop(absorbed_solar_w: np.ndarray, step_s: float, thermal: oe.ThermalConfig, cfg: ThermalLoopConfig | None = None, coupler=None) -> ThermalHistory:
     """
     March the loop through the whole scenario. `absorbed_solar_w` is the sunlight absorbed by the radiator at each step (from the orbit and
     eclipse engines, `SatelliteTrack.radiator_solar_load_w`); the waste heat and radiator sizing come from `thermal` (the Conditions panel).
+
+    `coupler` (optional) closes the loop with the electrical power subsystem: at every step it is called as
+    `coupler(i, core_temp_c, throttle_mode, load_fraction, radiator_temp_c)` and returns `(heat_w, flow_scale)`: the waste heat the spacecraft is actually
+    producing at that moment (compute + pumps + lasers + battery and busbar Joule heat ...) and a factor on the pump flow (1.0 = full speed). Its
+    `nominal_heat_w` attribute, if present, sets the steady state the loop starts from. Without a coupler the heat is the constant `thermal.internal_dissipation_w`
+    scaled by the throttle state, exactly as before.
     """
     cfg = cfg or ThermalLoopConfig()
     n = len(absorbed_solar_w)
-    p_nominal = thermal.internal_dissipation_w
+    p_nominal = thermal.internal_dissipation_w if coupler is None else float(getattr(coupler, "nominal_heat_w", thermal.internal_dissipation_w))
     core, rad, flow, byp = np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
     load = np.ones(n)
     modes = [NOMINAL] * n
@@ -100,10 +106,15 @@ def simulate_loop(absorbed_solar_w: np.ndarray, step_s: float, thermal: oe.Therm
     alpha = 1.0 - math.exp(-step_s / cfg.radiator_time_constant_s)
     for i in range(n):
         frac = 1.0 if mode == NOMINAL else (cfg.throttle_load if mode == THROTTLE else 0.0)
-        p = p_nominal * frac
+        if coupler is None:
+            p, flow_scale = p_nominal * frac, 1.0
+        else:
+            p, flow_scale = coupler(i, t_core, mode, frac, t_rad)
+            p = max(float(p), 0.0)
         t_eq = float(radiator_equilibrium_c(p, absorbed_solar_w[i], thermal.radiator_area_m2, thermal.emissivity, thermal.space_temperature_k))
         t_rad += alpha * (t_eq - t_rad)
-        q = max(coolant_flow_lpm(p, cfg), cfg.flow_min_lpm)
+        q = max(coolant_flow_lpm(p, cfg), cfg.flow_min_lpm) * flow_scale
+        q = max(q, 1e-3)
         mdot_cp = q / 60.0 * cfg.coolant_kg_per_l * cfg.coolant_cp_j_per_kg_k
         rise = p / mdot_cp
         b = bypass_fraction(t_rad, rise, cfg)

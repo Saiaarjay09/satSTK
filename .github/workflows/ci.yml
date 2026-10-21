@@ -37,3 +37,4 @@ jobs:
           if [ "$code" -ne 0 ]; then python tools/ci_annotate.py tests.log "pytest-${{ matrix.os }}"; fi
           exit $code
       - run: python main_app.py --headless --hours 6
+      - run: python eps_power_engine.py --hours 6

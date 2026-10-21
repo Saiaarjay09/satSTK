@@ -17,7 +17,7 @@ import math
 import sys
 from datetime import datetime, timezone
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -68,6 +68,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     r.add_argument("--show-radiation", action="store_true", help="with --screenshot: open the Radiation-Tolerant AI Scheduler tab after training up to --at-hours")
     r.add_argument("--rad-flare", action="store_true", help="with --show-radiation: a 1000x solar flare during the run")
     r.add_argument("--rad-minutes", type=float, default=90.0, help="with --show-radiation: minutes of mission time to train before the picture (default 90)")
+    e = ap.add_argument_group("electrical power subsystem (see eps_power_engine.py for its own command line)")
+    e.add_argument("--show-eps", action="store_true", help="with --screenshot: open the EPS Power, Battery & 48V Busbar tab")
+    e.add_argument("--eps-wing-failure", action="store_true", help="with --show-eps: lose one of the 12 solar panels")
+    e.add_argument("--eps-eclipse", action="store_true", help="with --show-eps: force every eclipse to last at least 45 minutes")
+    e.add_argument("--eps-degradation", type=float, default=0.0, metavar="PCT", help="with --show-eps: battery capacity lost, percent")
     ap.add_argument("--version", action="version", version=f"satSTK {__version__}")
     return ap.parse_args(argv)
 
@@ -155,7 +160,8 @@ def run_broadcast_headless(args) -> int:
     from simulation import run_simulation
     from telemetry_broadcaster import DigitalTwinSource, TelemetryBroadcaster
     result = run_simulation(config_from_args(args))
-    source = DigitalTwinSource(result)
+    from eps_power_engine import simulate_eps
+    source = DigitalTwinSource(result, eps_run=simulate_eps(result))              # thermal and eps_state come from the electrical-thermal closed loop
     speed = args.speed if args.speed else 60.0
     t_end = float(result.t_s[-1])
     t0 = (args.at_hours or 0.0) * 3600.0
@@ -200,6 +206,7 @@ def build_window_classes():
     from ui import theme
     from ui.clock import SPEEDS, PlaybackClock
     from ui.conditions_panel import ConditionsPanel
+    from ui.eps_panel import EPSPanel
     from ui.events_dialog import EventsDialog
     from ui.globe_view import GlobeView
     from ui.map_view import MapView
@@ -245,6 +252,7 @@ def build_window_classes():
             self.conditions = ConditionsPanel(self.cfg)
             self.payload = PayloadPanel()
             self.radiation = RadiationPanel()
+            self.eps = EPSPanel()
 
             top = QSplitter(Qt.Orientation.Horizontal)
             top.addWidget(self._titled("3D VIEW  ·  inertial", self.globe))
@@ -269,6 +277,8 @@ def build_window_classes():
             self.tabifyDockWidget(self.tele_dock, self.payload_dock)
             self.radiation_dock = self._dock("RADIATION-TOLERANT AI SCHEDULER  ·  32 blades", self.radiation, Qt.DockWidgetArea.RightDockWidgetArea, 600)
             self.tabifyDockWidget(self.payload_dock, self.radiation_dock)
+            self.eps_dock = self._dock("EPS POWER, BATTERY && 48V BUSBAR", self.eps, Qt.DockWidgetArea.RightDockWidgetArea, 600)
+            self.tabifyDockWidget(self.radiation_dock, self.eps_dock)
             self.tele_dock.raise_()
             self.cond_dock = self._dock("CONDITIONS  ·  tinker here", self.conditions, Qt.DockWidgetArea.LeftDockWidgetArea, 400)
 
@@ -300,6 +310,7 @@ def build_window_classes():
                 self.set_broadcast(True)
             self.map.station_move_requested.connect(self._station_clicked)
             self.radiation.overlay_changed.connect(self._radiation_overlay)
+            self.eps.run_changed.connect(self._apply_eps)
             self.radiation.downlink_requested.connect(self.downlink_weights)
 
         # ---------------------------------------------------------------- layout helpers
@@ -390,6 +401,7 @@ def build_window_classes():
             m.addAction(self.tele_dock.toggleViewAction())
             m.addAction(self.payload_dock.toggleViewAction())
             m.addAction(self.radiation_dock.toggleViewAction())
+            m.addAction(self.eps_dock.toggleViewAction())
             m = self.menuBar().addMenu("&Playback")
             for text, key, fn in (("Play / Pause", "Space", self.clock.toggle), ("Step forward", "Right", lambda: self.clock.step(1)),
                                   ("Step back", "Left", lambda: self.clock.step(-1)), ("Next pass", "N", self.next_pass)):
@@ -470,13 +482,7 @@ def build_window_classes():
             self.timeline.set_result(result)
             self.telemetry.set_result(result)
             self.payload.set_result(result)
-            try:
-                from telemetry_broadcaster import DigitalTwinSource
-                self.twin_source = DigitalTwinSource(result)
-            except Exception as exc:                           # the twin feed is optional: never let it break the simulation view
-                self.twin_source = None
-                self.twin_label.setText(f"Digital twin: cannot build telemetry ({exc})")
-            self.radiation.set_result(result, self.twin_source.thermal if self.twin_source is not None else None)
+            self.eps.set_result(result)                        # runs the electrical-thermal loop; _apply_eps then builds the twin source and restarts the AI scheduler
             self.clock.configure(result.t_s[-1], result.config.step_s)
             t0 = self._keep_time if self._keep_time is not None else self._first_pass_time()
             self._keep_time = None
@@ -578,7 +584,21 @@ def build_window_classes():
             self.telemetry.set_index(i)
             self.payload.set_time(t)
             self.radiation.set_time(t)
+            self.eps.set_time(t)
             self.time_label.setText(f"{self.result.utc(t):%Y-%m-%d %H:%M:%S} UTC    T+ {t / 3600:6.3f} h")
+
+        # ---------------------------------------------------------------- electrical power subsystem
+        def _apply_eps(self, run) -> None:
+            """A new EPS run (a new scenario or a stress test): the digital twin streams its thermal and electrical state and the AI scheduler follows its breaker and DVFS."""
+            if self.result is None:
+                return
+            try:
+                from telemetry_broadcaster import DigitalTwinSource
+                self.twin_source = DigitalTwinSource(self.result, eps_run=run)
+            except Exception as exc:                           # the twin feed is optional: never let it break the simulation view
+                self.twin_source = None
+                self.twin_label.setText(f"Digital twin: cannot build telemetry ({exc})")
+            self.radiation.set_result(self.result, run.thermal, run.history)
 
         # ---------------------------------------------------------------- radiation-tolerant AI scheduler
         def _radiation_overlay(self, on: bool, flux: float) -> None:
@@ -672,6 +692,13 @@ def run_gui(args) -> int:
         win.start_simulation(win.cfg, synchronous=True)
         if args.at_hours is not None:
             win.clock.seek(args.at_hours * 3600.0)
+        if args.show_eps:
+            win.eps.wing_btn.setChecked(args.eps_wing_failure)
+            win.eps.eclipse_btn.setChecked(args.eps_eclipse)
+            win.eps.deg_slider.setValue(int(args.eps_degradation))
+            win.eps.rerun()
+            win.show()
+            win.eps_dock.raise_()
         if args.show_radiation:
             t_end = (args.at_hours if args.at_hours is not None else 1.0) * 3600.0
             t = max(0.0, t_end - args.rad_minutes * 60.0)
@@ -750,6 +777,10 @@ def run_selftest(args) -> int:
         probe = trx.send(b"selftest payload through the optical DSP chain " * 4, i3, "Auto-Adaptive", 10.0, seed=1)
         lines.append(f"optical DSP: {probe.route_label} as {probe.modulation}: CRC {'OK' if probe.crc_ok else 'FAIL'}, bundled generator makes {len(pl.generate_test_payload()):,} bytes")
         ok = ok and probe.crc_ok and len(pl.generate_test_payload()) == 64512
+        eh = win.eps.run.history
+        eps_ok = len(eh.mode) == res.n and float(eh.soc.min()) > 0.2 and eh.v_min.min() >= 45.5 and win.twin_source is not None and "eps_state" in win.twin_source.packet_at(win.clock.t, 0)
+        lines.append(f"EPS: peak solar {eh.solar_w.max() / 1000:.1f} kW, lowest SoC {eh.soc.min() * 100:.1f} %, worst blade {eh.v_min.min():.3f} V, eps_state in the twin packet: {eps_ok}")
+        ok = ok and eps_ok
         for k in range(1, 4):
             win.radiation.set_time(float(win.clock.t) + 400.0 * k)
         rr = win.radiation.orch.summary()
