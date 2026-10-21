@@ -13,10 +13,11 @@ Everything runs locally with NumPy/SciPy/Skyfield and Qt. No Ansys STK, no Windo
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from datetime import datetime, timezone
 
-__version__ = "2.1.0"
+__version__ = "2.3.0"
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -63,6 +64,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     t.add_argument("--autoplay", action="store_true", help="start playing as soon as the scenario is computed (window)")
     t.add_argument("--no-placement", action="store_true", help="skip the 'place the beam origin' window and use the default station (for launchers)")
     t.add_argument("--wall-seconds", type=float, default=None, help="with --headless --broadcast: stop after this many real seconds (default: run until Ctrl-C)")
+    r = ap.add_argument_group("radiation-tolerant AI scheduler (see radiation_pytorch_scheduler.py for its own command line)")
+    r.add_argument("--show-radiation", action="store_true", help="with --screenshot: open the Radiation-Tolerant AI Scheduler tab after training up to --at-hours")
+    r.add_argument("--rad-flare", action="store_true", help="with --show-radiation: a 1000x solar flare during the run")
+    r.add_argument("--rad-minutes", type=float, default=90.0, help="with --show-radiation: minutes of mission time to train before the picture (default 90)")
     ap.add_argument("--version", action="version", version=f"satSTK {__version__}")
     return ap.parse_args(argv)
 
@@ -189,6 +194,8 @@ def build_window_classes():
                                    QMessageBox, QProgressBar, QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget)
 
     import orbital_engine as oe
+    from optical_dsp_bridge import MAX_PAYLOAD_BYTES
+    from pathlib import Path
     from simulation import SimulationConfig, run_simulation
     from ui import theme
     from ui.clock import SPEEDS, PlaybackClock
@@ -198,6 +205,7 @@ def build_window_classes():
     from ui.map_view import MapView
     from ui.payload_panel import PayloadPanel
     from ui.placement_dialog import PlacementDialog
+    from ui.radiation_panel import RadiationPanel
     from ui.telemetry_panel import TelemetryPanel
     from ui.timeline_view import TimelineView
 
@@ -236,6 +244,7 @@ def build_window_classes():
             self.telemetry = TelemetryPanel()
             self.conditions = ConditionsPanel(self.cfg)
             self.payload = PayloadPanel()
+            self.radiation = RadiationPanel()
 
             top = QSplitter(Qt.Orientation.Horizontal)
             top.addWidget(self._titled("3D VIEW  ·  inertial", self.globe))
@@ -258,6 +267,8 @@ def build_window_classes():
             self.tele_dock = self._dock("TELEMETRY  ·  link budget", self.telemetry, Qt.DockWidgetArea.RightDockWidgetArea, 470)
             self.payload_dock = self._dock("OPTICAL PAYLOAD TRANSMITTER  ·  fire real data", self.payload, Qt.DockWidgetArea.RightDockWidgetArea, 520)
             self.tabifyDockWidget(self.tele_dock, self.payload_dock)
+            self.radiation_dock = self._dock("RADIATION-TOLERANT AI SCHEDULER  ·  32 blades", self.radiation, Qt.DockWidgetArea.RightDockWidgetArea, 600)
+            self.tabifyDockWidget(self.payload_dock, self.radiation_dock)
             self.tele_dock.raise_()
             self.cond_dock = self._dock("CONDITIONS  ·  tinker here", self.conditions, Qt.DockWidgetArea.LeftDockWidgetArea, 400)
 
@@ -288,6 +299,8 @@ def build_window_classes():
             if self._broadcast_wanted:
                 self.set_broadcast(True)
             self.map.station_move_requested.connect(self._station_clicked)
+            self.radiation.overlay_changed.connect(self._radiation_overlay)
+            self.radiation.downlink_requested.connect(self.downlink_weights)
 
         # ---------------------------------------------------------------- layout helpers
         @staticmethod
@@ -376,6 +389,7 @@ def build_window_classes():
             m.addAction(self.cond_dock.toggleViewAction())
             m.addAction(self.tele_dock.toggleViewAction())
             m.addAction(self.payload_dock.toggleViewAction())
+            m.addAction(self.radiation_dock.toggleViewAction())
             m = self.menuBar().addMenu("&Playback")
             for text, key, fn in (("Play / Pause", "Space", self.clock.toggle), ("Step forward", "Right", lambda: self.clock.step(1)),
                                   ("Step back", "Left", lambda: self.clock.step(-1)), ("Next pass", "N", self.next_pass)):
@@ -462,6 +476,7 @@ def build_window_classes():
             except Exception as exc:                           # the twin feed is optional: never let it break the simulation view
                 self.twin_source = None
                 self.twin_label.setText(f"Digital twin: cannot build telemetry ({exc})")
+            self.radiation.set_result(result, self.twin_source.thermal if self.twin_source is not None else None)
             self.clock.configure(result.t_s[-1], result.config.step_s)
             t0 = self._keep_time if self._keep_time is not None else self._first_pass_time()
             self._keep_time = None
@@ -562,7 +577,27 @@ def build_window_classes():
             self.timeline.set_time(t)
             self.telemetry.set_index(i)
             self.payload.set_time(t)
+            self.radiation.set_time(t)
             self.time_label.setText(f"{self.result.utc(t):%Y-%m-%d %H:%M:%S} UTC    T+ {t / 3600:6.3f} h")
+
+        # ---------------------------------------------------------------- radiation-tolerant AI scheduler
+        def _radiation_overlay(self, on: bool, flux: float) -> None:
+            self.globe.set_radiation(on, flux)
+            self.map.set_radiation(on, flux)
+
+        def downlink_weights(self, path: str) -> None:
+            """Send an exported weights file through the existing 16QAM optical payload link (the payload dock does the transmission)."""
+            data = Path(path).read_bytes()
+            if len(data) > MAX_PAYLOAD_BYTES:
+                self.statusBar().showMessage(f"{Path(path).name} is {len(data):,} bytes; the optical payload limit is {MAX_PAYLOAD_BYTES:,}")
+                return
+            self.payload._set_file(data, Path(path).name)
+            self.payload.mod.setCurrentText("16QAM")
+            self.payload_dock.show()
+            self.payload_dock.raise_()
+            self.statusBar().showMessage(f"{Path(path).name} ({len(data):,} bytes) loaded into the optical payload dock as 16QAM; firing the laser downlink")
+            if self.payload.fire.isEnabled():
+                self.payload.fire.click()
 
         # ---------------------------------------------------------------- digital twin telemetry
         def set_broadcast(self, on: bool) -> None:
@@ -637,6 +672,17 @@ def run_gui(args) -> int:
         win.start_simulation(win.cfg, synchronous=True)
         if args.at_hours is not None:
             win.clock.seek(args.at_hours * 3600.0)
+        if args.show_radiation:
+            t_end = (args.at_hours if args.at_hours is not None else 1.0) * 3600.0
+            t = max(0.0, t_end - args.rad_minutes * 60.0)
+            win.clock.seek(t)
+            win.radiation.flare_btn.setChecked(bool(args.rad_flare))
+            while t < t_end:
+                t = min(t + 80.0, t_end)
+                win.radiation.set_time(t)
+            win.clock.seek(t_end)
+            win.show()
+            win.radiation_dock.raise_()
         if args.send_test_payload:
             from dsp import payload as pl
             data = pl.generate_test_payload()
@@ -704,6 +750,12 @@ def run_selftest(args) -> int:
         probe = trx.send(b"selftest payload through the optical DSP chain " * 4, i3, "Auto-Adaptive", 10.0, seed=1)
         lines.append(f"optical DSP: {probe.route_label} as {probe.modulation}: CRC {'OK' if probe.crc_ok else 'FAIL'}, bundled generator makes {len(pl.generate_test_payload()):,} bytes")
         ok = ok and probe.crc_ok and len(pl.generate_test_payload()) == 64512
+        for k in range(1, 4):
+            win.radiation.set_time(float(win.clock.t) + 400.0 * k)
+        rr = win.radiation.orch.summary()
+        lines.append(f"radiation scheduler ({rr['engine']} engine): {rr['steps']} training steps, {rr['protected_totals']['hits']} simulated bit flips, protected loss "
+                     f"{win.radiation.orch.history['loss_protected'][-1]:.3f}")
+        ok = ok and rr["steps"] >= 8 and math.isfinite(win.radiation.orch.history["loss_protected"][-1])
         lines.append(f"direct passes: {len(res.direct_windows[res.target])}, handovers: {len(res.route.handovers)}, uptime: {res.route.uptime_pct:.2f} %, events: {len(res.events)}, "
                      f"route now: {res.route.label(res.index_at(win.clock.t))}")
     except Exception as exc:

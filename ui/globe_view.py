@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QComboBox, QWidget
 
 import orbital_engine as oe
 
-from . import geo, theme
+from . import geo, radiation_overlay, theme
 
 BACKGROUND = QColor("#04070b")
 OCEAN_DAY = np.array([22, 78, 150], dtype=np.float32)
@@ -49,6 +49,8 @@ class GlobeView(QWidget):
         self._combo.addItem("Inertial camera")
         self._combo.currentIndexChanged.connect(self._camera_mode_changed)
         self._combo.setFixedWidth(200)
+        self.rad_overlay = False                    # SAA / auroral overlay (set by the Radiation-Tolerant AI Scheduler tab)
+        self.rad_strength = 0.6
         self.scale_mode = "compressed"
         self._scale_combo = QComboBox(self)
         self._scale_combo.addItems(["GEO ring: compressed scale", "GEO ring: true scale"])
@@ -69,6 +71,10 @@ class GlobeView(QWidget):
         self._combo.blockSignals(False)
         self.follow = None
         self._scale_combo.setVisible(bool(getattr(result, "relay_tracks", None)))
+        self.update()
+
+    def set_radiation(self, on: bool, flux_mult: float = 1.0) -> None:
+        self.rad_overlay, self.rad_strength = bool(on), radiation_overlay.pulse(flux_mult)
         self.update()
 
     def set_index(self, idx: int) -> None:
@@ -254,6 +260,8 @@ class GlobeView(QWidget):
         img = self._render_earth(eye, right, up, d_px, r_px * render_scale)
         half = d_px / render_scale / 2.0
         p.drawImage(QRectF(cx - half, cy - half, 2 * half, 2 * half), img)
+        if self.rad_overlay:
+            radiation_overlay.draw_on_globe(self, p, eye, right, up, sc, float(res.gmst[i]), self.rad_strength, oe.R_EARTH)
 
         # geostationary ring
         relay_tracks = getattr(res, "relay_tracks", [])

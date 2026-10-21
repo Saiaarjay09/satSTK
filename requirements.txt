@@ -4,3 +4,6 @@ scipy>=1.11
 skyfield>=1.48
 PySide6-Essentials>=6.6
 pyqtgraph>=0.13.4
+# PyTorch runs the Radiation-Tolerant AI Scheduler's training loop. It is OPTIONAL at run time: without it satSTK uses a built-in NumPy engine with the
+# same maths (the packaged desktop apps always use the NumPy engine). If your platform has no torch wheel, delete this line.
+torch>=2.2

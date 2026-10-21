@@ -9,17 +9,18 @@ for pkg in ("skyfield", "pyqtgraph", "scipy"):       # skyfield ships its leap-s
     datas += d
     binaries += b
     hiddenimports += h
-hiddenimports += ["orbital_engine", "laser_link_engine", "atmosphere", "events", "simulation", "optical_dsp_bridge", "telemetry_broadcaster", "thermal_loop", "dsp", "dsp.transmitter", "dsp.channel", "dsp.receiver", "dsp.payload", "ui.payload_panel", "ui.clock", "ui.conditions_panel", "ui.events_dialog",
+hiddenimports += ["orbital_engine", "laser_link_engine", "atmosphere", "events", "simulation", "optical_dsp_bridge", "telemetry_broadcaster", "thermal_loop", "seu_injector", "radiation_pytorch_scheduler", "ui.radiation_panel", "ui.radiation_overlay", "dsp", "dsp.transmitter", "dsp.channel", "dsp.receiver", "dsp.payload", "ui.payload_panel", "ui.clock", "ui.conditions_panel", "ui.events_dialog",
                   "ui.geo", "ui.globe_view", "ui.map_view", "ui.placement_dialog", "ui.telemetry_panel", "ui.theme", "ui.timeline_view"]
 
+# PyTorch is deliberately NOT bundled (it would add gigabytes): the packaged app trains with the NumPy engine, which gives the same results.
 QT_UNUSED = ["PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineQuick", "PySide6.QtQuick", "PySide6.QtQml",
              "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.QtMultimedia", "PySide6.QtCharts", "PySide6.QtDataVisualization",
              "PySide6.QtPdf", "PySide6.QtDesigner", "PySide6.QtSql", "PySide6.QtBluetooth"]
 a = Analysis(["main_app.py"], pathex=["."], binaries=binaries, datas=datas, hiddenimports=hiddenimports,
-             excludes=["tkinter", "matplotlib", "pytest", "wx", "PyQt5", "PyQt6", "IPython"] + QT_UNUSED, noarchive=False)
+             excludes=["torch", "tkinter", "matplotlib", "pytest", "wx", "PyQt5", "PyQt6", "IPython"] + QT_UNUSED, noarchive=False)
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="satSTK", console=False, upx=False)
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="satSTK")
 if sys.platform == "darwin":
     app = BUNDLE(coll, name="satSTK.app", bundle_identifier="org.satstk.app",
-                 info_plist={"CFBundleShortVersionString": "2.1.0", "NSHighResolutionCapable": True})
+                 info_plist={"CFBundleShortVersionString": "2.3.0", "NSHighResolutionCapable": True})

@@ -28,7 +28,8 @@ jobs:
       - name: System libraries Qt needs on a bare Linux runner
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libglib2.0-0
-      - run: python -m pip install -r requirements-dev.txt
+      - name: Install (PyTorch from its CPU-only index, which is far smaller than the default Linux wheel)
+        run: python -m pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
       - name: Tests
         run: |
           python -X faulthandler -m pytest -q -p no:cacheprovider --tb=short -rfE > tests.log 2>&1 && code=0 || code=$?

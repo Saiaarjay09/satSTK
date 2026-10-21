@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QWidget
 
 import orbital_engine as oe
 
-from . import geo, theme
+from . import geo, radiation_overlay, theme
 
 OCEAN = QColor("#0d2238")
 LAND = QColor("#2c4a3a")
@@ -52,6 +52,8 @@ class MapView(QWidget):
         self._land_cache = (None, None)
         self._track_cache = (None, None)
         self._night_arr = None
+        self.rad_overlay = False                    # SAA / auroral overlay (set by the Radiation-Tolerant AI Scheduler tab)
+        self.rad_strength = 0.6
         self._lat_c = np.radians(89.5 - np.arange(180))
         self._lon_c = np.radians(-179.5 + np.arange(360))
 
@@ -63,6 +65,10 @@ class MapView(QWidget):
 
     def set_index(self, idx: int) -> None:
         self.idx = idx
+        self.update()
+
+    def set_radiation(self, on: bool, flux_mult: float = 1.0) -> None:
+        self.rad_overlay, self.rad_strength = bool(on), radiation_overlay.pulse(flux_mult)
         self.update()
 
     # ------------------------------------------------------------------ geometry helpers
@@ -149,6 +155,8 @@ class MapView(QWidget):
         p.setBrush(LAND)
         p.drawPath(self._land_cache[1])
         p.drawImage(box, self._night_image(box))
+        if self.rad_overlay:
+            radiation_overlay.draw_on_map(p, box, self.rad_strength, theme.mono_font(8))
 
         # graticule
         p.setPen(QPen(QColor(255, 255, 255, 28), 1))

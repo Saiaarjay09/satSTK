@@ -1,15 +1,15 @@
-# v2.1.0: Integrated End-to-End Optical DSP & Payload Transmission
+# v2.3.0: Radiation-Tolerant 32-Blade PyTorch Scheduler & SAA Bit-Flip Recovery
 
-satSTK 2.1 lets you **fire a real file or message through the live orbital simulation, symbol by symbol**. The three physical-layer modules of the Orbital-Datacentre optical link simulator (IQ Mach-Zehnder transmitter, vacuum laser channel, PAT + demodulating receiver) are now part of satSTK (`dsp/`), and a new bridge feeds them the simulation's real orbital state.
+satSTK 2.3 trains a real neural network across the **32 server blades of the Alpha-Sigma orbital datacentre** (a 1:1 satCAD design, 2 banks × 16 trays) while cosmic-ray bit flips, driven by the satellite's live latitude / longitude / altitude, corrupt the blades' weights and gradients, and shows how the system heals itself without pausing the other blades.
 
 ### What is new
 
-- **Optical Payload Transmitter dock** (a tab beside the Telemetry dock): type text, load a file, or press **Generate 63 KB Test Payload** (1,008 self-checking 64-byte lines); choose BPSK / QPSK / 8PSK / 16QAM or **Auto-Adaptive**, laser power, beacon power, symbol rate, **FSM closed-loop ON/OFF**; press **Fire Laser Payload**.
-- **Pick any moment and any route:** direct LEO, 2-hop via GEO-IND, or 3-hop via GEO-IND and GEO-ATL/PAC. Each hop uses the simulation's real range, aperture, power, beam width, pointing jitter and (on the ground hop) the atmosphere and events at that time; the GEO relays receive, add noise, and re-amplify with their EDFAs.
-- **End-to-end diagnostics:** IQ constellation, Fast Steering Mirror quadrant-detector trajectory (spiral search then PI tracking onto the centre), side-by-side payload diff (wrong bytes in red), CRC-32 pass/fail badge, exact BER, bytes wrong, 64-byte blocks bad, frame loss %, end-to-end latency, PAT time to lock.
-- **Auto-Adaptive modulation:** predicts the route's end-to-end Es/N0 and picks the densest scheme that should still pass the CRC; steps down from 16QAM to 8PSK/QPSK/BPSK as the route gets longer or the symbols faster.
-- **Continuous file stream:** slices a file into frames and sends them while the satellite moves, over the route in force at each moment. Example: the 63 KB payload streamed across a GEO → direct → GEO handover delivers 63 of 63 frames and a matching whole-file CRC, with every handover make-before-break.
-- Command line: `--send-text`, `--send-file`, `--send-test-payload`, `--stream`, `--route`, `--mod`, `--dsp-rate`, `--no-fsm`. Everything is NumPy/SciPy only.
+- **Radiation model (`seu_injector.py`)**: 1e-5 upsets per blade per second at nominal LEO, **15× over the polar horns** (|lat| > 60°) and **100× over the South Atlantic Anomaly** (lat −50…0°, lon −90…+40°), plus an altitude factor and a 1000× solar-flare switch. `inject_ieee754_bitflip` flips one random bit of a float32 / bfloat16 / float16 / float64 NumPy array or torch tensor with XOR and reports whether it hit the **mantissa** (noise), **sign** (inverted weight) or **exponent** (up to ~1e38, Inf or NaN). A rare **Single-Event Latchup** takes a blade offline for 15 s until the 48 V breaker power-cycles it.
+- **Fault-tolerant 32-blade orchestrator (`radiation_pytorch_scheduler.py`)** with four layers: a gradient **sanitizer** (CRC-32, L2 norm, NaN/Inf, quarantine above 5× the median); **TMR shielding** (10 triads, 2-of-3 gradient voting, 2 hot spares) switched on when the orbit predicts the SAA; **ECC parity + a SHA-256 verified OBC checkpoint** that restores a damaged blade over a modelled 100 Gbps backplane while the other 31 keep training; and **thermal coupling**: at 75 °C Bank B hibernates and Bank A takes the whole batch.
+- **New tab "Radiation-Tolerant AI Scheduler"**: a live 2×16 blade grid (green healthy, yellow = mantissa flip scrubbed by ECC, red = exponent NaN strike caught, purple = TMR shielding, grey = hibernated or power-cycling), a protected-vs-unprotected loss chart (the unprotected baseline goes NaN when upsets hit; the protected one converges), the **SAA and auroral glow on the 2D map and the 3D globe**, and chaos controls: **Force Solar Flare / CME (1000× flux)**, **Toggle ECC & TMR Protection**, **Export Recovered .pt Weights**, which can fire the file straight through the existing **16QAM optical downlink**.
+- **PyTorch or NumPy**: `torch` is now in `requirements.txt`. Without it a built-in NumPy engine does the same job (same loss and gradients to 1e-5); the packaged desktop apps use the NumPy engine.
+- Command line: `python radiation_pytorch_scheduler.py --hours 3` (add `--flare`, `--export weights.pt`), and `python main_app.py --screenshot shot.png --show-radiation`.
+- Includes the digital-twin telemetry stream to satCAD that was added after v2.1.0.
 
 ### Download the file for your computer (below, under Assets)
 
@@ -29,6 +29,8 @@ The apps are **not code-signed**, so your computer will warn you:
 
 ### Please note (honest limits)
 
-- The DSP default is **10 Gbaud**, not the simulation's 250 Gbaud: the DSP has **no forward error correction**, and its real receiver performs about 3 dB worse than textbook theory, so at 250 Gbaud a 63 KB frame cannot pass the CRC over the GEO paths (the tests check this).
-- Doppler is assumed removed by the receiver; relays are idealised amplifiers and assumed locked (only the satellite terminal runs PAT); scintillation is one random fade per frame. Not validated against Ansys STK or real hardware.
-- The macOS app is built and tested on an Apple-silicon Mac; the Windows installer is built and smoke-tested by GitHub's automated build but has not been run on a real PC by the author. A 63 KB BPSK payload peaks at about 1 GB of memory.
+- **The radiation numbers are simulation assumptions, not measurements**: the upset rates, the 15× / 100× multipliers, the zone boxes (the real SAA is not a rectangle), the 15 s latchup recovery, the 100 Gbps backplane and the 5× norm threshold are placeholders, not from flight data or beam tests. **Nothing here is flight-qualified** and no hardware fault rate is claimed. The 32 "blades" are replicas in one Python process, and the workload is a small MLP, not a language model.
+- A random bit is rarely fatal (about 1 hit in 32 flips bit 30), so one SAA pass can leave the unprotected twin alive; the flare button makes its failure certain. The protected system survived every test, which is evidence, not a guarantee.
+- Reed-Solomon coding was not implemented (SHA-256 plus a mirrored copy protect the checkpoint). The workload is not fed back into the thermal model.
+- All v2.1 limits still apply (J2-only orbit, no FEC in the DSP, rules-of-thumb atmosphere). Not validated against Ansys STK or real hardware.
+- The macOS app is built and tested on an Apple-silicon Mac; the Windows installer is built and smoke-tested by GitHub's automated build but has not been run on a real PC by the author.
